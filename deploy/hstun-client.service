@@ -1,0 +1,42 @@
+[Unit]
+Description=hstun client (TCP over HTTPS tunnel, dialing side)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=hstun
+Group=hstun
+ExecStart=/usr/local/bin/hstun client -config /etc/hstun/client.toml
+Restart=always
+RestartSec=3
+LimitNOFILE=8192
+MemoryMax=512M
+TasksMax=4096
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+# For a listen port below 1024 use AmbientCapabilities=CAP_NET_BIND_SERVICE and the same bounding set.
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProcSubset=pid
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

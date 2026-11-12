@@ -1,0 +1,7 @@
+# secrets and real configs never go in git
+secret
+*.key
+*.pem
+*.toml
+!*.example.toml
+/bin/

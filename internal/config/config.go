@@ -1,0 +1,351 @@
+// Package config loads the TOML files. Unknown keys are an error, so a typo
+// in a security setting can never be silently ignored.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
+
+	"hstun/internal/decoy"
+)
+
+// Default carrier paths. They are public in the source repository, so every
+// deployment should set its own.
+const (
+	DefaultWSPath   = "/hs/ws"
+	DefaultHTTPPath = "/hs/h"
+)
+
+// Roles. The entry owns the user-facing listeners (forwards, SOCKS5) and
+// opens streams; the exit serves them (fixed targets, optional SOCKS exit).
+// Either role can be on the listening side (server) or the dialing side
+// (client): reverse mode is server=entry + client=exit, direct mode is
+// client=entry + server=exit.
+const (
+	RoleEntry = "entry"
+	RoleExit  = "exit"
+)
+
+type ServerFile struct {
+	Server    ServerSection `toml:"server"`
+	Forward   []Forward     `toml:"forward"`
+	Socks     SocksSection  `toml:"socks"`
+	SocksExit SocksExit     `toml:"socks_exit"`
+}
+
+type ServerSection struct {
+	Role        string   `toml:"role"` // entry (default) or exit
+	Listen      string   `toml:"listen"`
+	TLSCert     string   `toml:"tls_cert"`
+	TLSKey      string   `toml:"tls_key"`
+	Carriers    []string `toml:"carriers"`
+	WSPath      string   `toml:"ws_path"`
+	HTTPPath    string   `toml:"http_path"`
+	DecoyDir    string   `toml:"decoy_dir"` // static site shown to everyone who is not the tunnel; empty = built-in page
+	SecretFiles []string `toml:"secret_files"`
+
+	TrustProxy   string `toml:"trust_proxy"`
+	CFRangesFile string `toml:"cf_ranges_file"`
+
+	MaxConns             int      `toml:"max_conns"`
+	MaxConnsPerIP        int      `toml:"max_conns_per_ip"` // 0 = off; Cloudflare peers are exempt
+	AllowFrom            []string `toml:"allow_from"`       // optional source CIDR allow-list
+	MaxSessionsPerKey    int      `toml:"max_sessions_per_key"`
+	MaxStreamsPerSession int      `toml:"max_streams_per_session"`
+	// ForwardMaxConnsPerIP caps concurrent connections per source IP on the
+	// entry-role forward and SOCKS ports (0 = off): each one holds a stream.
+	ForwardMaxConnsPerIP int    `toml:"forward_max_conns_per_ip"`
+	AuthFailPerMinPerIP  int    `toml:"auth_fail_per_min_per_ip"`
+	IdleTimeout          string `toml:"idle_timeout"`
+	AdminListen          string `toml:"admin_listen"`
+}
+
+type Forward struct {
+	Name   string `toml:"name"`
+	Listen string `toml:"listen"` // entry role only
+	Target string `toml:"target"` // exit role only
+}
+
+type SocksSection struct {
+	Enabled bool   `toml:"enabled"`
+	Listen  string `toml:"listen"`
+	// SOCKS5 here has no authentication, so a non-loopback listen address is
+	// refused unless this is set on purpose.
+	AllowPublic bool `toml:"allow_public"`
+}
+
+type ClientFile struct {
+	Client    ClientSection `toml:"client"`
+	Forward   []Forward     `toml:"forward"`
+	Socks     SocksSection  `toml:"socks"`
+	SocksExit SocksExit     `toml:"socks_exit"`
+}
+
+type ClientSection struct {
+	Role       string `toml:"role"` // exit (default) or entry
+	Server     string `toml:"server"`
+	Connect    string `toml:"connect"`
+	SNI        string `toml:"sni"`
+	Carrier    string `toml:"carrier"`
+	Conns      int    `toml:"conns"`
+	SecretFile string `toml:"secret_file"`
+	Name       string `toml:"name"`
+	WSPath     string `toml:"ws_path"`
+	HTTPPath   string `toml:"http_path"`
+	UserAgent  string `toml:"user_agent"` // empty = a common browser string
+
+	TLSVerify  string `toml:"tls_verify"`
+	CAFile     string `toml:"ca_file"`
+	SPKISHA256 string `toml:"spki_sha256"`
+	TLSMLKEM   bool   `toml:"tls_mlkem"`
+
+	Ping        string `toml:"ping"`
+	IdleTimeout string `toml:"idle_timeout"`
+
+	// Entry role only.
+	MaxStreamsPerSession int    `toml:"max_streams_per_session"`
+	ForwardMaxConnsPerIP int    `toml:"forward_max_conns_per_ip"` // 0 = off
+	AdminListen          string `toml:"admin_listen"`
+}
+
+type SocksExit struct {
+	Enabled     bool  `toml:"enabled"`
+	DenyPrivate bool  `toml:"deny_private"`
+	AllowPorts  []int `toml:"allow_ports"`
+}
+
+func decode(path string, v any) error {
+	md, err := toml.DecodeFile(path, v)
+	if err != nil {
+		return err
+	}
+	if u := md.Undecoded(); len(u) > 0 {
+		keys := make([]string, len(u))
+		for i, k := range u {
+			keys[i] = k.String()
+		}
+		return fmt.Errorf("%s: unknown keys: %s", path, strings.Join(keys, ", "))
+	}
+	return nil
+}
+
+func LoadServer(path string) (*ServerFile, error) {
+	f := &ServerFile{}
+	f.Server.Role = RoleEntry
+	f.SocksExit.DenyPrivate = true
+	f.Server.Carriers = []string{"ws", "http"}
+	f.Server.WSPath = DefaultWSPath
+	f.Server.HTTPPath = DefaultHTTPPath
+	f.Server.MaxConns = 1024
+	f.Server.MaxConnsPerIP = 64
+	f.Server.MaxSessionsPerKey = 16
+	f.Server.MaxStreamsPerSession = 256
+	f.Server.ForwardMaxConnsPerIP = 256
+	f.Server.AuthFailPerMinPerIP = 10
+	f.Server.IdleTimeout = "10m"
+	if err := decode(path, f); err != nil {
+		return nil, err
+	}
+	return f, f.validate()
+}
+
+func (f *ServerFile) validate() error {
+	s := &f.Server
+	if s.Listen == "" || s.TLSCert == "" || s.TLSKey == "" {
+		return errors.New("server: listen, tls_cert and tls_key are required")
+	}
+	if len(s.SecretFiles) == 0 {
+		return errors.New("server: secret_files is required")
+	}
+	if len(s.Carriers) == 0 {
+		return errors.New("server: carriers must not be empty")
+	}
+	for _, c := range s.Carriers {
+		if c != "ws" && c != "http" {
+			return fmt.Errorf("server: unknown carrier %q", c)
+		}
+	}
+	if !strings.HasPrefix(s.WSPath, "/") || !strings.HasPrefix(s.HTTPPath, "/") || s.WSPath == s.HTTPPath {
+		return errors.New("server: ws_path and http_path must start with / and differ")
+	}
+	if s.DecoyDir != "" {
+		if err := decoy.CheckDir(s.DecoyDir); err != nil {
+			return fmt.Errorf("server: decoy_dir: %w", err)
+		}
+	}
+	if s.TrustProxy != "" && s.TrustProxy != "cloudflare" {
+		return fmt.Errorf("server: trust_proxy %q unsupported", s.TrustProxy)
+	}
+	if s.TrustProxy == "cloudflare" && s.CFRangesFile == "" {
+		return errors.New("server: trust_proxy=cloudflare needs cf_ranges_file")
+	}
+	if d, err := time.ParseDuration(s.IdleTimeout); err != nil || d < time.Second {
+		return fmt.Errorf("server: idle_timeout must be a duration of at least 1s, got %q", s.IdleTimeout)
+	}
+	// A zero here would not mean "off": a zero-size connection limit refuses every
+	// connection and a zero stream cap leaves no session able to open a stream.
+	if s.MaxConns < 1 {
+		return errors.New("server: max_conns must be >= 1")
+	}
+	if s.MaxStreamsPerSession < 1 {
+		return errors.New("server: max_streams_per_session must be >= 1")
+	}
+	if s.MaxConnsPerIP < 0 || s.MaxSessionsPerKey < 0 || s.AuthFailPerMinPerIP < 0 || s.ForwardMaxConnsPerIP < 0 {
+		return errors.New("server: max_conns_per_ip, max_sessions_per_key, auth_fail_per_min_per_ip and forward_max_conns_per_ip must be >= 0 (0 = off)")
+	}
+	for _, c := range s.AllowFrom {
+		if _, _, err := net.ParseCIDR(c); err != nil {
+			return fmt.Errorf("server: allow_from %q: %w", c, err)
+		}
+	}
+	if s.AdminListen != "" && !isLoopback(s.AdminListen) {
+		return errors.New("server: admin_listen must be a loopback address (the stats page has no authentication)")
+	}
+	if err := validateRole(s.Role, f.Forward, f.Socks, f.SocksExit); err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+	return nil
+}
+
+// validateRole checks the forwards and SOCKS sections against the role, so a
+// setting that would be silently ignored is an error instead.
+func validateRole(role string, fws []Forward, socks SocksSection, se SocksExit) error {
+	seen := map[string]bool{}
+	for _, fw := range fws {
+		if fw.Name == "" {
+			return errors.New("forward: name is required")
+		}
+		if seen[fw.Name] {
+			return fmt.Errorf("forward: duplicate name %q", fw.Name)
+		}
+		seen[fw.Name] = true
+		switch role {
+		case RoleEntry:
+			if fw.Listen == "" || fw.Target != "" {
+				return fmt.Errorf("forward %s: the entry role needs listen and no target", fw.Name)
+			}
+			if _, _, err := net.SplitHostPort(fw.Listen); err != nil {
+				return fmt.Errorf("forward %s: %w", fw.Name, err)
+			}
+		case RoleExit:
+			if fw.Target == "" || fw.Listen != "" {
+				return fmt.Errorf("forward %s: the exit role needs target and no listen", fw.Name)
+			}
+			if _, _, err := net.SplitHostPort(fw.Target); err != nil {
+				return fmt.Errorf("forward %s: %w", fw.Name, err)
+			}
+		default:
+			return fmt.Errorf("role must be %q or %q, got %q", RoleEntry, RoleExit, role)
+		}
+	}
+	if role != RoleEntry && role != RoleExit {
+		return fmt.Errorf("role must be %q or %q, got %q", RoleEntry, RoleExit, role)
+	}
+	if socks.Enabled && role != RoleEntry {
+		return errors.New("socks listener only applies to the entry role")
+	}
+	if socks.Enabled && socks.Listen == "" {
+		return errors.New("socks: listen is required when enabled")
+	}
+	if socks.Enabled && !socks.AllowPublic && !isLoopback(socks.Listen) {
+		return errors.New("socks: listen must be a loopback address (no authentication); set allow_public = true to override")
+	}
+	if se.Enabled && role != RoleExit {
+		return errors.New("socks_exit only applies to the exit role")
+	}
+	return nil
+}
+
+func LoadClient(path string) (*ClientFile, error) {
+	f := &ClientFile{}
+	f.Client.Role = RoleExit
+	f.Client.MaxStreamsPerSession = 256
+	f.Client.ForwardMaxConnsPerIP = 256
+	f.Client.Carrier = "ws"
+	f.Client.Conns = 4
+	f.Client.Name = "client"
+	f.Client.WSPath = DefaultWSPath
+	f.Client.HTTPPath = DefaultHTTPPath
+	f.Client.TLSVerify = "system"
+	f.Client.Ping = "25s"
+	f.Client.IdleTimeout = "10m"
+	f.SocksExit.DenyPrivate = true
+	if err := decode(path, f); err != nil {
+		return nil, err
+	}
+	return f, f.validate()
+}
+
+func (f *ClientFile) validate() error {
+	c := &f.Client
+	if c.Server == "" || c.SecretFile == "" {
+		return errors.New("client: server and secret_file are required")
+	}
+	if _, _, err := net.SplitHostPort(c.Server); err != nil {
+		return fmt.Errorf("client: server: %w", err)
+	}
+	if c.Connect != "" {
+		if _, _, err := net.SplitHostPort(c.Connect); err != nil {
+			return fmt.Errorf("client: connect: %w", err)
+		}
+	}
+	if c.Carrier != "ws" && c.Carrier != "http" {
+		return fmt.Errorf("client: carrier must be ws or http, got %q", c.Carrier)
+	}
+	if c.Conns < 1 || c.Conns > 64 {
+		return errors.New("client: conns must be 1..64")
+	}
+	switch c.TLSVerify {
+	case "system":
+	case "ca_file":
+		if c.CAFile == "" {
+			return errors.New("client: tls_verify=ca_file needs ca_file")
+		}
+	case "spki":
+		if len(c.SPKISHA256) != 64 {
+			return errors.New("client: tls_verify=spki needs spki_sha256 (64 hex chars)")
+		}
+	default:
+		return fmt.Errorf("client: unknown tls_verify %q", c.TLSVerify)
+	}
+	ping, err := time.ParseDuration(c.Ping)
+	if err != nil {
+		return fmt.Errorf("client: bad ping %q: %w", c.Ping, err)
+	}
+	// The mux declares a session dead after 80 s without any received byte, so
+	// pings must be on and comfortably faster than that.
+	if ping < time.Second || ping > 60*time.Second {
+		return fmt.Errorf("client: ping must be between 1s and 60s, got %q", c.Ping)
+	}
+	if d, err := time.ParseDuration(c.IdleTimeout); err != nil || d < time.Second {
+		return fmt.Errorf("client: idle_timeout must be a duration of at least 1s, got %q", c.IdleTimeout)
+	}
+	if c.ForwardMaxConnsPerIP < 0 {
+		return errors.New("client: forward_max_conns_per_ip must be >= 0 (0 = off)")
+	}
+	if c.MaxStreamsPerSession < 1 {
+		return errors.New("client: max_streams_per_session must be >= 1")
+	}
+	if c.AdminListen != "" && !isLoopback(c.AdminListen) {
+		return errors.New("client: admin_listen must be a loopback address (the stats page has no authentication)")
+	}
+	if err := validateRole(c.Role, f.Forward, f.Socks, f.SocksExit); err != nil {
+		return fmt.Errorf("client: %w", err)
+	}
+	return nil
+}
+
+// isLoopback reports whether a host:port names a loopback IP literal.
+func isLoopback(hostport string) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}

@@ -1,0 +1,29 @@
+# hstun client, REVERSE mode: dials and is the exit. For direct mode see client-entry.example.toml.
+# Copy to /etc/hstun/client.toml (0640 root:hstun).
+[client]
+role        = "exit"                     # exit (default) | entry
+server      = "hs.example.org:443"       # hostname behind Cloudflare (or host:port direct)
+connect     = ""                         # optional ip:port to dial instead (direct test: "198.51.100.20:23456")
+sni         = ""                         # defaults to the host of `server`
+carrier     = "ws"                       # ws | http  (the profile switch)
+conns       = 4
+secret_file = "/etc/hstun/secret"        # the same secret as the server
+name        = "exit-a"
+ws_path     = "/hs/ws"                  # must match the server; CHANGE from the public default
+http_path   = "/hs/h"
+# user_agent  = ""                      # empty = a common browser string
+tls_verify  = "system"                   # system | ca_file | spki (never off)
+ca_file     = ""                         # for ca_file: the CA that signed the server cert
+spki_sha256 = ""                         # for spki: sha256 of the server's public key (hex)
+tls_mlkem   = false                      # keep false: the big ClientHello broke one real path
+ping        = "25s"
+idle_timeout = "10m"
+
+[[forward]]
+name   = "x1"
+target = "127.0.0.1:19990"               # a loopback service on this host
+
+[socks_exit]
+enabled      = true
+deny_private = true                      # refuse loopback, private, CGNAT, link-local and own IPs
+allow_ports  = []                        # empty = any port
