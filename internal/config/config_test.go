@@ -200,14 +200,22 @@ func TestLimitsAndDurationsValidated(t *testing.T) {
 		}
 	}
 	for name, extra := range map[string]string{
-		"idle_timeout 0s": "idle_timeout=\"0s\"\n",
-		"ping 0s":         "ping=\"0s\"\n",
-		"ping too slow":   "ping=\"90s\"\n",
-		"negative cap":    "forward_max_conns_per_ip=-3\n",
+		"idle_timeout 0s":  "idle_timeout=\"0s\"\n",
+		"ping 0s":          "ping=\"0s\"\n",
+		"ping too slow":    "ping=\"90s\"\n",
+		"negative cap":     "forward_max_conns_per_ip=-3\n",
+		"stagger negative": "dial_stagger=\"-1s\"\n",
+		"stagger too long": "dial_stagger=\"5m\"\n",
+		"stagger garbage":  "dial_stagger=\"soon\"\n",
 	} {
 		s := "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\n" + extra
 		if _, err := LoadClient(write(t, s)); err == nil {
 			t.Errorf("client %s: accepted", name)
+		}
+	}
+	for _, v := range []string{"0s", "2s", "30s"} {
+		if _, err := LoadClient(write(t, "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\ndial_stagger=\""+v+"\"\n")); err != nil {
+			t.Errorf("dial_stagger %s rejected: %v", v, err)
 		}
 	}
 	// 0 stays valid where it means "off".

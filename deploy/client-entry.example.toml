@@ -7,7 +7,8 @@ connect     = ""                         # optional ip:port to dial instead (kee
 carrier     = "ws"                       # ws | http
 ws_path     = "/hs/ws"                   # must match the exit; CHANGE from the public default
 # user_agent  = ""                       # empty = a common browser string
-conns       = 4
+conns       = 2                          # 2 measured as fast as 4 on a real path and looks less uniform
+dial_stagger = "2s"                      # first dial of sessions 1.. waits a random 0.5-2 s; "0s" = all at once
 secret_file = "/etc/hstun/secret"
 name        = "entry-a"
 tls_verify  = "spki"                     # system | ca_file | spki (never off)
