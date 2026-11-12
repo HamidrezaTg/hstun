@@ -68,9 +68,9 @@ def status(data):
 s = tls_conn()
 d = http(s, b"GET / HTTP/1.1\r\nHost: probe\r\nConnection: close\r\n\r\n")
 s.close()
-check("GET / -> 404", status(d) == 404, str(status(d)))
+check("GET / is the decoy site (200) or a plain 404", status(d) in (200, 404), str(status(d)))
 low = d.lower()
-check("404 does not name hstun/Go", b"hstun" not in low and b"go-http" not in low)
+check("GET / answer does not name hstun/Go", b"hstun" not in low and b"go-http" not in low)
 
 # 2. Plain WS path without an upgrade is refused, not a 200.
 s = tls_conn()
@@ -167,7 +167,7 @@ time.sleep(1)
 s = tls_conn()
 d = http(s, b"GET / HTTP/1.1\r\nHost: probe\r\nConnection: close\r\n\r\n")
 s.close()
-check("listener still responsive after the probes", status(d) == 404, str(status(d)))
+check("listener still responsive after the probes", status(d) in (200, 404), str(status(d)))
 
 failed = results.count(False)
 print(f"\n{len(results) - failed}/{len(results)} checks passed")

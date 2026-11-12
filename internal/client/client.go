@@ -36,6 +36,8 @@ type Client struct {
 	opts carrier.Options
 	ping time.Duration
 	idle time.Duration
+	// stagger is the longest random delay before a non-first session's first dial.
+	stagger time.Duration
 
 	hub   *entry.Hub   // role entry
 	entry *entry.Entry // role entry
@@ -66,8 +68,9 @@ func New(cfg *config.ClientFile, logger *slog.Logger) (*Client, error) {
 	}
 	ping, _ := time.ParseDuration(cfg.Client.Ping)
 	idle, _ := time.ParseDuration(cfg.Client.IdleTimeout)
+	stagger, _ := time.ParseDuration(cfg.Client.DialStagger)
 	c := &Client{
-		cfg: cfg, log: logger, key: key, ping: ping, idle: idle,
+		cfg: cfg, log: logger, key: key, ping: ping, idle: idle, stagger: stagger,
 		opts: carrier.Options{
 			Server: cfg.Client.Server, Connect: cfg.Client.Connect, SNI: sni,
 			WSPath: cfg.Client.WSPath, HTTPPath: cfg.Client.HTTPPath, TLS: tc, UserAgent: cfg.Client.UserAgent,
@@ -125,6 +128,13 @@ func (c *Client) Run(ctx context.Context) {
 
 // slot keeps one carrier session alive, reconnecting with jittered backoff.
 func (c *Client) slot(ctx context.Context, i int) {
+	if d := staggerDelay(c.stagger, i); d > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(d):
+		}
+	}
 	backoff := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
@@ -146,6 +156,17 @@ func (c *Client) slot(ctx context.Context, i int) {
 			backoff *= 2
 		}
 	}
+}
+
+// staggerDelay is how long slot i waits before its first dial: nothing for
+// slot 0 or when staggering is off, otherwise a random time in [max/4, max].
+// It only spreads connection set-up; it does not touch traffic timing.
+func staggerDelay(max time.Duration, slot int) time.Duration {
+	if slot == 0 || max <= 0 {
+		return 0
+	}
+	lo := max / 4
+	return lo + time.Duration(rand.Int64N(int64(max-lo)+1))
 }
 
 func errString(err error) string {

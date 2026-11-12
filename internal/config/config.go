@@ -87,17 +87,21 @@ type ClientFile struct {
 }
 
 type ClientSection struct {
-	Role       string `toml:"role"` // exit (default) or entry
-	Server     string `toml:"server"`
-	Connect    string `toml:"connect"`
-	SNI        string `toml:"sni"`
-	Carrier    string `toml:"carrier"`
-	Conns      int    `toml:"conns"`
-	SecretFile string `toml:"secret_file"`
-	Name       string `toml:"name"`
-	WSPath     string `toml:"ws_path"`
-	HTTPPath   string `toml:"http_path"`
-	UserAgent  string `toml:"user_agent"` // empty = a common browser string
+	Role    string `toml:"role"` // exit (default) or entry
+	Server  string `toml:"server"`
+	Connect string `toml:"connect"`
+	SNI     string `toml:"sni"`
+	Carrier string `toml:"carrier"`
+	Conns   int    `toml:"conns"`
+	// DialStagger spreads the first dials of a client's sessions: session 0
+	// connects at once, every other session waits a random time between a
+	// quarter of this value and the value itself. "0s" dials them all together.
+	DialStagger string `toml:"dial_stagger"`
+	SecretFile  string `toml:"secret_file"`
+	Name        string `toml:"name"`
+	WSPath      string `toml:"ws_path"`
+	HTTPPath    string `toml:"http_path"`
+	UserAgent   string `toml:"user_agent"` // empty = a common browser string
 
 	TLSVerify  string `toml:"tls_verify"`
 	CAFile     string `toml:"ca_file"`
@@ -268,6 +272,7 @@ func LoadClient(path string) (*ClientFile, error) {
 	f.Client.ForwardMaxConnsPerIP = 256
 	f.Client.Carrier = "ws"
 	f.Client.Conns = 4
+	f.Client.DialStagger = "2s"
 	f.Client.Name = "client"
 	f.Client.WSPath = DefaultWSPath
 	f.Client.HTTPPath = DefaultHTTPPath
@@ -299,6 +304,11 @@ func (f *ClientFile) validate() error {
 	}
 	if c.Conns < 1 || c.Conns > 64 {
 		return errors.New("client: conns must be 1..64")
+	}
+	if c.DialStagger != "" {
+		if d, err := time.ParseDuration(c.DialStagger); err != nil || d < 0 || d > 30*time.Second {
+			return fmt.Errorf("client: dial_stagger must be a duration between 0s and 30s, got %q", c.DialStagger)
+		}
 	}
 	switch c.TLSVerify {
 	case "system":
