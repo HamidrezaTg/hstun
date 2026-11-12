@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly safety reload of the hstun nginx (certificate pick-up if the path watch missed a renewal)
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+Unit=hstun-nginx-reload.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Reload the hstun nginx so it picks up a renewed certificate
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl reload hstun-nginx.service

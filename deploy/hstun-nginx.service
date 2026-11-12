@@ -1,0 +1,27 @@
+[Unit]
+Description=nginx in front of hstun (own instance, own config)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+RuntimeDirectory=hstun-nginx
+RuntimeDirectoryMode=0755
+ExecStartPre=/usr/sbin/nginx -t -c /etc/hstun/nginx.conf
+ExecStart=/usr/sbin/nginx -c /etc/hstun/nginx.conf -g 'daemon off;'
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=3
+LimitNOFILE=8192
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+LockPersonality=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target
