@@ -1,0 +1,28 @@
+# hstun client, DIRECT mode: dials and is the entry. It owns the client-facing ports.
+# Pairs with deploy/server-exit.example.toml. Copy to /etc/hstun/client.toml (0640 root:hstun).
+[client]
+role        = "entry"
+server      = "exit.example.org:23456"   # the exit listener
+connect     = ""                         # optional ip:port to dial instead (keeps the name for SNI)
+carrier     = "ws"                       # ws | http
+ws_path     = "/hs/ws"                   # must match the exit; CHANGE from the public default
+# user_agent  = ""                       # empty = a common browser string
+conns       = 4
+secret_file = "/etc/hstun/secret"
+name        = "entry-a"
+tls_verify  = "spki"                     # system | ca_file | spki (never off)
+spki_sha256 = ""                         # sha256 of the exit's public key (hex) for a self-signed cert
+tls_mlkem   = false
+ping        = "25s"
+idle_timeout = "10m"
+max_streams_per_session = 256
+forward_max_conns_per_ip = 256           # per-source cap on forward/SOCKS ports (0 = off)
+admin_listen = "127.0.0.1:9110"          # /stats, loopback only
+
+[[forward]]
+name   = "x1"                            # must match a forward name on the exit
+listen = "0.0.0.0:20151"                 # client-facing port; open in ufw only when a backend exists
+
+[socks]
+enabled = true
+listen  = "127.0.0.1:34567"              # loopback only (no authentication)

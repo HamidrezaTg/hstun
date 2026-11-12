@@ -1,0 +1,118 @@
+// Package carrier holds what is shared by the WebSocket and HTTP carriers:
+// the client TLS configuration and the dial options.
+package carrier
+
+import (
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+)
+
+// Options describe how a client reaches the server.
+type Options struct {
+	Server   string // host:port used in URLs and the Host header
+	Connect  string // optional ip:port to dial instead of Server
+	SNI      string // TLS server name; defaults to the host of Server
+	WSPath   string
+	HTTPPath string
+	TLS      *tls.Config
+	// UserAgent is sent on every request; empty means DefaultUserAgent.
+	UserAgent string
+}
+
+// ClientTLS builds the client TLS config. Verification is never disabled:
+// "system" uses the OS roots, "ca_file" a private CA, "spki" pins the leaf
+// public key (the pin check is then the verification).
+func ClientTLS(serverName, verify, caFile, spkiHex string, mlkem bool) (*tls.Config, error) {
+	cfg := &tls.Config{
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"http/1.1"},
+		// Resume sessions like any HTTPS client does: later connections carry a
+		// session ticket instead of a full handshake. A resumed session was
+		// already verified (or pinned) on its first full handshake.
+		ClientSessionCache: tls.NewLRUClientSessionCache(64),
+	}
+	if !mlkem {
+		// Drop the X25519MLKEM768 hybrid: its large ClientHello broke the
+		// websocket upgrade on one real path.
+		cfg.CurvePreferences = []tls.CurveID{tls.X25519, tls.CurveP256}
+	}
+	switch verify {
+	case "system", "":
+	case "ca_file":
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("%s: no certificates found", caFile)
+		}
+		cfg.RootCAs = pool
+	case "spki":
+		pin, err := hex.DecodeString(strings.ToLower(spkiHex))
+		if err != nil || len(pin) != sha256.Size {
+			return nil, errors.New("spki_sha256 must be 64 hex characters")
+		}
+		cfg.InsecureSkipVerify = true // replaced by the pin check below
+		cfg.VerifyPeerCertificate = func(raw [][]byte, _ [][]*x509.Certificate) error {
+			if len(raw) == 0 {
+				return errors.New("no server certificate")
+			}
+			leaf, err := x509.ParseCertificate(raw[0])
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+			if !equal(sum[:], pin) {
+				return errors.New("server key does not match spki_sha256 pin")
+			}
+			return nil
+		}
+	default:
+		return nil, fmt.Errorf("unknown tls_verify %q", verify)
+	}
+	return cfg, nil
+}
+
+func equal(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var v byte
+	for i := range a {
+		v |= a[i] ^ b[i]
+	}
+	return v == 0
+}
+
+// DefaultUserAgent is what requests carry when `user_agent` is not set. It is
+// only a header: the TLS handshake is still Go's own (see README, "Looking like
+// ordinary HTTPS").
+const DefaultUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+
+type uaTransport struct {
+	rt http.RoundTripper
+	ua string
+}
+
+func (t uaTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("User-Agent", t.ua)
+	return t.rt.RoundTrip(r)
+}
+
+// WithUserAgent sets the User-Agent header on every request of rt.
+func WithUserAgent(rt http.RoundTripper, ua string) http.RoundTripper {
+	if ua == "" {
+		ua = DefaultUserAgent
+	}
+	return uaTransport{rt: rt, ua: ua}
+}

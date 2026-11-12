@@ -1,0 +1,33 @@
+# hstun server, REVERSE mode: listens and is the entry. For direct mode see server-exit.example.toml.
+# Copy to /etc/hstun/server.toml (0640 root:hstun).
+[server]
+role        = "entry"                    # entry (default) | exit
+listen      = "0.0.0.0:23456"            # pick a free port; Cloudflare reaches it via an Origin Rule
+tls_cert    = "/etc/hstun/origin.pem"    # Cloudflare Origin Certificate (SAN = your hostname)
+tls_key     = "/etc/hstun/origin.key"
+carriers    = ["ws", "http"]
+ws_path     = "/hs/ws"                  # CHANGE: these defaults are public in the repository
+http_path   = "/hs/h"                   # CHANGE
+# decoy_dir   = "/var/www/decoy"        # static site shown to everyone who is not the tunnel (built-in page if unset)
+secret_files = ["/etc/hstun/secret"]     # hstun keygen -out /etc/hstun/secret (0600)
+
+trust_proxy    = "cloudflare"            # honour CF-Connecting-IP only from these ranges
+cf_ranges_file = "/etc/hstun/cf-ranges.txt"
+
+max_conns               = 1024
+max_conns_per_ip        = 64                 # Cloudflare peers are exempt
+# allow_from            = ["203.0.113.10/32"]   # optional: only these sources may connect (direct, no Cloudflare)
+max_sessions_per_key    = 16
+max_streams_per_session = 256
+forward_max_conns_per_ip = 256              # entry role: per-source cap on forward/SOCKS ports (0 = off)
+auth_fail_per_min_per_ip = 10
+idle_timeout            = "10m"
+admin_listen            = "127.0.0.1:9109"   # /stats JSON, loopback only
+
+[[forward]]
+name   = "x1"
+listen = "0.0.0.0:20151"                 # client-facing port; open in ufw only when a backend exists
+
+[socks]
+enabled = true
+listen  = "127.0.0.1:34567"              # loopback by default

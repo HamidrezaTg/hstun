@@ -1,0 +1,30 @@
+# hstun server, DIRECT mode: listens and is the exit (the outside host).
+# The entry dials in with deploy/client-entry.example.toml. Copy to /etc/hstun/server.toml (0640 root:hstun).
+[server]
+role         = "exit"
+listen       = "0.0.0.0:23456"            # keep >= 1024, or add CAP_NET_BIND_SERVICE to the unit
+tls_cert     = "/etc/hstun/cert.pem"      # a real certificate, or a self-signed one pinned with spki on the entry
+tls_key      = "/etc/hstun/key.pem"
+carriers     = ["ws", "http"]
+ws_path      = "/hs/ws"                 # CHANGE: these defaults are public in the repository
+http_path    = "/hs/h"                  # CHANGE
+# decoy_dir    = "/var/www/decoy"       # static site shown to everyone who is not the tunnel (built-in page if unset)
+secret_files = ["/etc/hstun/secret"]
+
+allow_from      = ["198.51.100.20/32"]     # only the entry may connect; also add the ufw rule
+max_conns       = 1024
+max_conns_per_ip = 64
+max_sessions_per_key    = 16
+max_streams_per_session = 256             # also caps what a compromised entry can open here
+auth_fail_per_min_per_ip = 10
+idle_timeout    = "10m"
+admin_listen    = "127.0.0.1:9109"
+
+[[forward]]
+name   = "x1"
+target = "127.0.0.1:19990"                # fixed loopback target; the entry only names it
+
+[socks_exit]
+enabled      = false                      # turn on only if you want a general exit
+deny_private = true
+allow_ports  = []

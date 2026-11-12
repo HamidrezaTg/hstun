@@ -1,0 +1,230 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func write(t *testing.T, s string) string {
+	p := filepath.Join(t.TempDir(), "c.toml")
+	if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestServerUnknownKeyRejected(t *testing.T) {
+	p := write(t, `[server]
+listen="0.0.0.0:1"
+tls_cert="a"
+tls_key="b"
+secret_files=["s"]
+tls_verfy="oops"
+`)
+	if _, err := LoadServer(p); err == nil || !strings.Contains(err.Error(), "unknown keys") {
+		t.Fatalf("typo not rejected: %v", err)
+	}
+}
+
+func TestServerDefaultsAndValidation(t *testing.T) {
+	ok := write(t, `[server]
+listen="0.0.0.0:1"
+tls_cert="a"
+tls_key="b"
+secret_files=["s"]
+`)
+	f, err := LoadServer(ok)
+	if err != nil || f.Server.MaxConns != 1024 || f.Server.WSPath != "/hs/ws" {
+		t.Fatalf("defaults: %v %+v", err, f)
+	}
+	bad := map[string]string{
+		"no listen":    "[server]\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\n",
+		"same paths":   "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\nws_path=\"/x\"\nhttp_path=\"/x\"\n",
+		"cf no ranges": "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"cloudflare\"\n",
+		"bad carrier":  "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ncarriers=[\"quic\"]\n",
+	}
+	for name, s := range bad {
+		if _, err := LoadServer(write(t, s)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestClientValidation(t *testing.T) {
+	good := write(t, "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\n")
+	if _, err := LoadClient(good); err != nil {
+		t.Fatal(err)
+	}
+	bad := map[string]string{
+		"carrier":    "[client]\nserver=\"h:1\"\nsecret_file=\"s\"\ncarrier=\"tcp\"\n",
+		"conns":      "[client]\nserver=\"h:1\"\nsecret_file=\"s\"\nconns=0\n",
+		"verify":     "[client]\nserver=\"h:1\"\nsecret_file=\"s\"\ntls_verify=\"off\"\n",
+		"spki short": "[client]\nserver=\"h:1\"\nsecret_file=\"s\"\ntls_verify=\"spki\"\nspki_sha256=\"ab\"\n",
+		"no port":    "[client]\nserver=\"h\"\nsecret_file=\"s\"\n",
+	}
+	for name, s := range bad {
+		if _, err := LoadClient(write(t, s)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+const srvBase = "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\n"
+const cliBase = "[client]\nserver=\"h:1\"\nsecret_file=\"s\"\n"
+
+func TestRoles(t *testing.T) {
+	ok := map[string]func() error{
+		"reverse server (entry)": func() error {
+			_, err := LoadServer(write(t, srvBase+"[[forward]]\nname=\"x\"\nlisten=\"127.0.0.1:2\"\n[socks]\nenabled=true\nlisten=\"127.0.0.1:3\"\n"))
+			return err
+		},
+		"reverse client (exit)": func() error {
+			_, err := LoadClient(write(t, cliBase+"[[forward]]\nname=\"x\"\ntarget=\"127.0.0.1:2\"\n[socks_exit]\nenabled=true\n"))
+			return err
+		},
+		"direct server (exit)": func() error {
+			_, err := LoadServer(write(t, srvBase+"role=\"exit\"\n[[forward]]\nname=\"x\"\ntarget=\"127.0.0.1:2\"\n[socks_exit]\nenabled=true\n"))
+			return err
+		},
+		"direct client (entry)": func() error {
+			_, err := LoadClient(write(t, "[client]\nrole=\"entry\"\nserver=\"h:1\"\nsecret_file=\"s\"\n[[forward]]\nname=\"x\"\nlisten=\"127.0.0.1:2\"\n[socks]\nenabled=true\nlisten=\"127.0.0.1:3\"\n"))
+			return err
+		},
+	}
+	for name, f := range ok {
+		if err := f(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	bad := map[string]func() error{
+		"unknown role": func() error {
+			_, err := LoadClient(write(t, "[client]\nrole=\"both\"\nserver=\"h:1\"\nsecret_file=\"s\"\n"))
+			return err
+		},
+		"entry forward with target": func() error {
+			_, err := LoadServer(write(t, srvBase+"[[forward]]\nname=\"x\"\nlisten=\"127.0.0.1:2\"\ntarget=\"127.0.0.1:9\"\n"))
+			return err
+		},
+		"exit forward with listen": func() error {
+			_, err := LoadClient(write(t, cliBase+"[[forward]]\nname=\"x\"\nlisten=\"127.0.0.1:2\"\n"))
+			return err
+		},
+		"socks listener on exit": func() error {
+			_, err := LoadClient(write(t, cliBase+"[socks]\nenabled=true\nlisten=\"127.0.0.1:3\"\n"))
+			return err
+		},
+		"socks_exit on entry": func() error {
+			_, err := LoadServer(write(t, srvBase+"[socks_exit]\nenabled=true\n"))
+			return err
+		},
+	}
+	for name, f := range bad {
+		if err := f(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestPublicListenersRefused(t *testing.T) {
+	bad := map[string]func() error{
+		"socks on all interfaces": func() error {
+			_, err := LoadServer(write(t, srvBase+"[socks]\nenabled=true\nlisten=\"0.0.0.0:3\"\n"))
+			return err
+		},
+		"admin on all interfaces": func() error {
+			_, err := LoadServer(write(t, srvBase+"admin_listen=\"0.0.0.0:9\"\n"))
+			return err
+		},
+		"client admin public": func() error {
+			_, err := LoadClient(write(t, cliBase+"admin_listen=\"10.0.0.1:9\"\n"))
+			return err
+		},
+		"bad allow_from": func() error {
+			_, err := LoadServer(write(t, srvBase+"allow_from=[\"nope\"]\n"))
+			return err
+		},
+	}
+	for name, f := range bad {
+		if err := f(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := LoadServer(write(t, srvBase+"admin_listen=\"127.0.0.1:9\"\n[socks]\nenabled=true\nlisten=\"[::1]:3\"\n")); err != nil {
+		t.Errorf("loopback rejected: %v", err)
+	}
+	if _, err := LoadServer(write(t, srvBase+"[socks]\nenabled=true\nlisten=\"0.0.0.0:3\"\nallow_public=true\n")); err != nil {
+		t.Errorf("explicit allow_public rejected: %v", err)
+	}
+}
+
+// The shipped examples must stay valid, or the documented setup breaks.
+func TestExampleConfigsLoad(t *testing.T) {
+	for name, load := range map[string]func(string) error{
+		"server.example.toml":      func(p string) error { _, err := LoadServer(p); return err },
+		"server-exit.example.toml": func(p string) error { _, err := LoadServer(p); return err },
+		"client.example.toml":      func(p string) error { _, err := LoadClient(p); return err },
+		"client-entry.example.toml": func(p string) error {
+			// spki_sha256 is blank in the template; fill a placeholder pin.
+			b, _ := os.ReadFile(filepath.Join("..", "..", "deploy", "client-entry.example.toml"))
+			fixed := strings.Replace(string(b), `spki_sha256 = ""`, `spki_sha256 = "`+strings.Repeat("ab", 32)+`"`, 1)
+			_, err := LoadClient(write(t, fixed))
+			return err
+		},
+	} {
+		p := filepath.Join("..", "..", "deploy", name)
+		if name == "client-entry.example.toml" {
+			p = ""
+		}
+		if err := load(p); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// Values that would not mean "off" but silently break the tunnel must be refused.
+func TestLimitsAndDurationsValidated(t *testing.T) {
+	const srvBase = "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\n"
+	for name, extra := range map[string]string{
+		"max_conns 0":                 "max_conns=0\n",
+		"max_streams_per_session 0":   "max_streams_per_session=0\n",
+		"max_streams_per_session < 0": "max_streams_per_session=-1\n",
+		"idle_timeout 0s":             "idle_timeout=\"0s\"\n",
+		"idle_timeout negative":       "idle_timeout=\"-5m\"\n",
+		"negative per-ip cap":         "max_conns_per_ip=-1\n",
+		"negative forward cap":        "forward_max_conns_per_ip=-1\n",
+	} {
+		if _, err := LoadServer(write(t, srvBase+extra)); err == nil {
+			t.Errorf("server %s: accepted", name)
+		}
+	}
+	for name, extra := range map[string]string{
+		"idle_timeout 0s": "idle_timeout=\"0s\"\n",
+		"ping 0s":         "ping=\"0s\"\n",
+		"ping too slow":   "ping=\"90s\"\n",
+		"negative cap":    "forward_max_conns_per_ip=-3\n",
+	} {
+		s := "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\n" + extra
+		if _, err := LoadClient(write(t, s)); err == nil {
+			t.Errorf("client %s: accepted", name)
+		}
+	}
+	// 0 stays valid where it means "off".
+	if _, err := LoadServer(write(t, srvBase+"max_conns_per_ip=0\nmax_sessions_per_key=0\nauth_fail_per_min_per_ip=0\nforward_max_conns_per_ip=0\n")); err != nil {
+		t.Errorf("0 = off rejected: %v", err)
+	}
+}
+
+func TestDecoyDirValidated(t *testing.T) {
+	good := t.TempDir()
+	mk := func(dir string) string {
+		return write(t, "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ndecoy_dir=\""+dir+"\"\n")
+	}
+	if _, err := LoadServer(mk(good)); err != nil {
+		t.Fatalf("existing dir rejected: %v", err)
+	}
+	if _, err := LoadServer(mk(filepath.Join(good, "missing"))); err == nil || !strings.Contains(err.Error(), "decoy_dir") {
+		t.Fatalf("missing decoy_dir accepted: %v", err)
+	}
+}
