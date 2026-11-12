@@ -113,7 +113,7 @@ What is done (each has a test):
 - **ALPN `http/1.1` in the ClientHello**, as a browser sends for a websocket. net/http silently drops
   it for upgrade requests, so the websocket carrier does its own TLS dial. (`TestDialLooksLikeOrdinaryHTTPSClient`)
 - **TLS session resumption** across the client's connections, like any HTTPS client (same test).
-- **A browser-style `User-Agent`** instead of `Go-http-client/1.1` (`user_agent` to change it).
+- **A browser-style `User-Agent`** instead of `Go-http-client/1.1` (`user_agent` to change it; the default carries the current Chrome major and is bumped at each release).
 - **TLS 1.3 everywhere it is available**, certificate hidden inside the handshake, then only TLS
   application-data records on the wire (checked with packet captures, see the audit report).
 - **Warning at startup** while `ws_path`/`http_path` are still the public defaults.

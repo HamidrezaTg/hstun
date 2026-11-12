@@ -95,8 +95,11 @@ func equal(a, b []byte) bool {
 
 // DefaultUserAgent is what requests carry when `user_agent` is not set. It is
 // only a header: the TLS handshake is still Go's own (see README, "Looking like
-// ordinary HTTPS").
-const DefaultUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+// ordinary HTTPS"). Chrome has frozen the rest of the string, so only the major
+// version changes; bump it at every release to the current stable Chrome major
+// (`google-chrome-stable --version`), because a months-old version is a tell.
+// Last bumped 2026-11-12 (Chrome 157).
+const DefaultUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
 
 type uaTransport struct {
 	rt http.RoundTripper
