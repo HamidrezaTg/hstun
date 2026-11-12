@@ -1,0 +1,28 @@
+# hstun server (exit) behind a local nginx (deploy/nginx-front.example.conf). nginx owns the public port, TLS certificate
+# and decoy site; hstun listens on loopback only and believes X-Real-IP only from a loopback peer.
+[server]
+role         = "exit"
+listen       = "127.0.0.1:24083"          # loopback only: required by trust_proxy = "loopback"
+trust_proxy  = "loopback"                 # real client IP from X-Real-IP (set by nginx); no allow_from in this mode
+tls_cert     = "/etc/hstun/cert.pem"      # backend TLS on loopback: any certificate, nginx does not verify it
+tls_key      = "/etc/hstun/key.pem"
+carriers     = ["ws", "http"]
+ws_path      = "/CHANGE-ws-path"          # must match nginx
+http_path    = "/CHANGE-http-path"        # must match nginx
+secret_files = ["/etc/hstun/secret"]
+
+max_conns       = 1024
+max_sessions_per_key    = 16
+max_streams_per_session = 256
+auth_fail_per_min_per_ip = 10             # counted per real client IP
+idle_timeout    = "10m"
+admin_listen    = "127.0.0.1:9109"
+
+[[forward]]
+name   = "x1"
+target = "127.0.0.1:19990"
+
+[socks_exit]
+enabled      = false
+deny_private = true
+allow_ports  = []

@@ -66,7 +66,7 @@ only on an exit; SOCKS5 and admin listeners must be loopback (SOCKS only with
 
 Server (`deploy/server.example.toml`): `role`, `listen`, `tls_cert`/`tls_key`, `carriers`,
 `ws_path`/`http_path` (set your own; anything else is answered by the decoy site), `decoy_dir`, `secret_files` (several
-allowed for rotation), `trust_proxy = "cloudflare"` + `cf_ranges_file`
+allowed for rotation), `trust_proxy = "cloudflare"` + `cf_ranges_file` (or `"loopback"` behind a local nginx, see below)
 (`CF-Connecting-IP` is trusted only from those ranges), connection and auth-failure
 limits (`max_conns`, `max_conns_per_ip`, `auth_fail_per_min_per_ip`,
 `forward_max_conns_per_ip` for the entry forward/SOCKS ports, optional
@@ -226,3 +226,12 @@ scripts/build.sh           # static build and sha256
 5 MB down and 2 MB up through the SOCKS port; `scripts/wedge-host.py` holds
 half-dead connections against a live server while timing a legitimate request;
 `scripts/sec-probe.py` sends hostile input an unauthenticated client could send.
+
+## Behind nginx
+
+For a server that answers like an ordinary nginx site (nginx's TLS handshake, `Server: nginx`, nginx's own 404 and decoy
+pages), put nginx in front: `deploy/nginx-front.example.conf` and `deploy/server-behind-nginx.example.toml`. nginx owns the
+public port and the CA certificate, serves the decoy, and proxies only the two secret paths (WebSocket upgrades and POSTs) to
+hstun on `127.0.0.1`. hstun runs with `trust_proxy = "loopback"`: it believes `X-Real-IP` only from a loopback peer (the config
+refuses a non-loopback `listen` or an `allow_from` in this mode), so the auth-failure limiter still works per real client.
+Without hstun's own per-IP cap, add a kernel connection cap (see the comment in the nginx example).

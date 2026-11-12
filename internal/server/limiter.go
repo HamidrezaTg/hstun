@@ -110,6 +110,13 @@ func loadRanges(path string) (ranges, error) {
 	return r, sc.Err()
 }
 
+// loopbackRanges is every loopback address: the only peers trusted by trust_proxy = "loopback".
+func loopbackRanges() ranges {
+	_, v4, _ := net.ParseCIDR("127.0.0.0/8")
+	_, v6, _ := net.ParseCIDR("::1/128")
+	return ranges{v4, v6}
+}
+
 func (r ranges) contains(ip net.IP) bool {
 	for _, n := range r {
 		if n.Contains(ip) {
