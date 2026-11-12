@@ -9,3 +9,4 @@ Go module `hstun`.
 - Security: everything after the handshake goes through `internal/seal`; never bypass it. New listeners must be loopback by default; new pre-auth input needs caps and a test.
 - Keep it plain: real TLS and ordinary HTTP/WebSocket framing only. No protocol imitation, no browser TLS-fingerprint copying, fake URL rotation or DPI tricks. Making the server look like an ordinary website (decoy, ALPN, resumption) is in scope; see README "Looking like ordinary HTTPS".
 - Every new read/write/handshake needs a deadline and a length cap; add a wedge-style test for anything that accepts input from the network.
+- Release checklist: bump `DefaultUserAgent` in `internal/carrier/tlsconf.go` to the current stable Chrome major (the string is frozen apart from the major), run `scripts/test.sh`.
