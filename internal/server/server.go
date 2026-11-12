@@ -44,7 +44,10 @@ type Server struct {
 	hub  *entry.Hub
 	fail *failLimiter
 	cf   ranges
-	idle time.Duration
+	// proxyHeader is the header that carries the real client IP when the TCP
+	// peer is inside cf.
+	proxyHeader string
+	idle        time.Duration
 
 	entry *entry.Entry // role entry
 	exit  *exit.Exit   // role exit
@@ -90,10 +93,14 @@ func New(cfg *config.ServerFile, logger *slog.Logger) (*Server, error) {
 	if cfg.Server.WSPath == config.DefaultWSPath || cfg.Server.HTTPPath == config.DefaultHTTPPath {
 		logger.Warn("ws_path or http_path is still the default, which is public in the source repository; set your own paths")
 	}
-	if cfg.Server.TrustProxy == "cloudflare" {
+	switch cfg.Server.TrustProxy {
+	case "cloudflare":
 		if s.cf, err = loadRanges(cfg.Server.CFRangesFile); err != nil {
 			return nil, err
 		}
+		s.proxyHeader = "CF-Connecting-IP"
+	case "loopback":
+		s.cf, s.proxyHeader = loopbackRanges(), "X-Real-IP"
 	}
 	return s, nil
 }
@@ -226,8 +233,9 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// clientIPOf returns the real source IP: CF-Connecting-IP only when the TCP
-// peer is inside the configured Cloudflare ranges, otherwise the peer itself.
+// clientIPOf returns the real source IP: the proxy header (CF-Connecting-IP, or
+// X-Real-IP behind a loopback proxy) only when the TCP peer is inside the
+// trusted ranges, otherwise the peer itself.
 func (s *Server) clientIPOf(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -235,7 +243,11 @@ func (s *Server) clientIPOf(r *http.Request) string {
 	}
 	if s.cf != nil {
 		if peer := net.ParseIP(host); peer != nil && s.cf.contains(peer) {
-			if real := net.ParseIP(r.Header.Get("CF-Connecting-IP")); real != nil {
+			hdr := s.proxyHeader
+			if hdr == "" {
+				hdr = "CF-Connecting-IP"
+			}
+			if real := net.ParseIP(r.Header.Get(hdr)); real != nil {
 				return real.String()
 			}
 		}

@@ -45,6 +45,32 @@ func TestClientIPTrustsHeaderOnlyFromCloudflare(t *testing.T) {
 	}
 }
 
+func TestClientIPLoopbackProxy(t *testing.T) {
+	s := &Server{cf: loopbackRanges(), proxyHeader: "X-Real-IP"}
+	mk := func(remote, name, hdr string) *http.Request {
+		r := &http.Request{RemoteAddr: remote, Header: http.Header{}}
+		if hdr != "" {
+			r.Header.Set(name, hdr)
+		}
+		return r
+	}
+	if got := s.clientIPOf(mk("127.0.0.1:4000", "X-Real-IP", "203.0.113.7")); got != "203.0.113.7" {
+		t.Errorf("X-Real-IP from the local proxy ignored: %s", got)
+	}
+	if got := s.clientIPOf(mk("[::1]:4000", "X-Real-IP", "2001:db8::5")); got != "2001:db8::5" {
+		t.Errorf("X-Real-IP from an IPv6 loopback peer ignored: %s", got)
+	}
+	if got := s.clientIPOf(mk("198.51.100.4:4000", "X-Real-IP", "203.0.113.7")); got != "198.51.100.4" {
+		t.Errorf("spoofed X-Real-IP trusted from a non-loopback peer: %s", got)
+	}
+	if got := s.clientIPOf(mk("127.0.0.1:4000", "CF-Connecting-IP", "203.0.113.7")); got != "127.0.0.1" {
+		t.Errorf("wrong header trusted in loopback mode: %s", got)
+	}
+	if got := s.clientIPOf(mk("127.0.0.1:4000", "X-Real-IP", "garbage")); got != "127.0.0.1" {
+		t.Errorf("bad header not ignored: %s", got)
+	}
+}
+
 func TestLoadRangesRejectsGarbage(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "bad.txt")
 	_ = os.WriteFile(p, []byte("not-a-cidr\n"), 0o600)

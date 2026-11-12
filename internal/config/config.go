@@ -182,7 +182,18 @@ func (f *ServerFile) validate() error {
 			return fmt.Errorf("server: decoy_dir: %w", err)
 		}
 	}
-	if s.TrustProxy != "" && s.TrustProxy != "cloudflare" {
+	switch s.TrustProxy {
+	case "", "cloudflare":
+	case "loopback":
+		// Behind a local web server every peer is 127.0.0.1 and X-Real-IP carries the
+		// real address, so the header must only ever be believed from a loopback peer.
+		if !loopbackListen(s.Listen) {
+			return errors.New("server: trust_proxy=loopback needs listen on a loopback address such as 127.0.0.1:24083")
+		}
+		if len(s.AllowFrom) > 0 {
+			return errors.New("server: allow_from cannot be combined with trust_proxy=loopback (every peer is the proxy); filter in the proxy or the firewall")
+		}
+	default:
 		return fmt.Errorf("server: trust_proxy %q unsupported", s.TrustProxy)
 	}
 	if s.TrustProxy == "cloudflare" && s.CFRangesFile == "" {
@@ -353,6 +364,16 @@ func (f *ClientFile) validate() error {
 // isLoopback reports whether a host:port names a loopback IP literal.
 func isLoopback(hostport string) bool {
 	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// loopbackListen reports whether addr is host:port with a literal loopback IP.
+func loopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return false
 	}
