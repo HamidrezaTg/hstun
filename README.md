@@ -76,7 +76,7 @@ or `[socks_exit]` depending on the role.
 Client (`deploy/client.example.toml`): `role`, `server`, optional `connect` (dial an IP
 while keeping the hostname for SNI/Host), `carrier`, `conns` (2 is enough; more connections did not measure faster), `dial_stagger`
 (spreads the first dials, default `2s`), `user_agent`, `tls_verify`
-(`system`, `ca_file` or `spki`; never off), `tls_mlkem` (keep false), `[[forward]]`
+(`system`, `ca_file` or `spki`; never off), `tls_mlkem` (default false; it worked to one host and broke the upgrade to another, so test each path before enabling), `[[forward]]`
 (`name` -> local `target`), `[socks_exit]` (`deny_private` refuses loopback,
 private, CGNAT, link-local and the host's own addresses).
 
