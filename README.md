@@ -234,4 +234,4 @@ pages), put nginx in front: `deploy/nginx-front.example.conf` and `deploy/server
 public port and the CA certificate, serves the decoy, and proxies only the two secret paths (WebSocket upgrades and POSTs) to
 hstun on `127.0.0.1`. hstun runs with `trust_proxy = "loopback"`: it believes `X-Real-IP` only from a loopback peer (the config
 refuses a non-loopback `listen` or an `allow_from` in this mode), so the auth-failure limiter still works per real client.
-Without hstun's own per-IP cap, add a kernel connection cap (see the comment in the nginx example).
+Without hstun's own per-IP cap, add a kernel connection cap (see the comment in the nginx example). Units: `deploy/hstun-nginx.service`, and `hstun-nginx-reload.{path,service,timer}` to reload nginx when the renewed certificate appears (edit the `PathChanged=` line).

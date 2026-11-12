@@ -1,0 +1,10 @@
+[Unit]
+Description=Reload the hstun nginx when the certificate file changes
+
+[Path]
+# Point this at the certificate nginx serves (the renewed file, not a copy).
+PathChanged=/etc/letsencrypt/live/tunnel.example.org/fullchain.pem
+Unit=hstun-nginx-reload.service
+
+[Install]
+WantedBy=multi-user.target
