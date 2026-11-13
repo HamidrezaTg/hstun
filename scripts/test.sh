@@ -19,5 +19,7 @@ fi
 go vet ./...
 go test -race -count=1 "$@" ./...
 for f in FuzzReadMsg FuzzReadOpen FuzzParseHello; do
-  go test ./internal/proto -run '^$' -fuzz "^${f}\$" -fuzztime 5s
+  # Go's fuzzer sometimes reports "context deadline exceeded" when its time limit lands while a worker is mid-run
+  # on a busy machine (no crashing input is saved). A real finding fails again and leaves a file in testdata/fuzz.
+  go test ./internal/proto -run '^$' -fuzz "^${f}\$" -fuzztime 5s || go test ./internal/proto -run '^$' -fuzz "^${f}\$" -fuzztime 5s
 done
