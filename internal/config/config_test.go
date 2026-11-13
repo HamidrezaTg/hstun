@@ -40,13 +40,15 @@ secret_files=["s"]
 		t.Fatalf("defaults: %v %+v", err, f)
 	}
 	bad := map[string]string{
-		"no listen":              "[server]\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\n",
-		"same paths":             "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\nws_path=\"/x\"\nhttp_path=\"/x\"\n",
-		"cf no ranges":           "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"cloudflare\"\n",
-		"loopback public listen": "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"loopback\"\n",
-		"loopback hostname":      "[server]\nlisten=\"localhost:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"loopback\"\n",
-		"loopback allow_from":    "[server]\nlisten=\"127.0.0.1:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"loopback\"\nallow_from=[\"10.0.0.0/8\"]\n",
-		"bad carrier":            "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ncarriers=[\"quic\"]\n",
+		"no listen":                 "[server]\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\n",
+		"same paths":                "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\nws_path=\"/x\"\nhttp_path=\"/x\"\n",
+		"cf no ranges":              "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"cloudflare\"\n",
+		"loopback public listen":    "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"loopback\"\n",
+		"loopback hostname":         "[server]\nlisten=\"localhost:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"loopback\"\n",
+		"cloudflared public listen": "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"cloudflared\"\n",
+		"cloudflared allow_from":    "[server]\nlisten=\"127.0.0.1:1\"\nsecret_files=[\"s\"]\ntrust_proxy=\"cloudflared\"\nallow_from=[\"10.0.0.0/8\"]\n",
+		"loopback allow_from":       "[server]\nlisten=\"127.0.0.1:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"loopback\"\nallow_from=[\"10.0.0.0/8\"]\n",
+		"bad carrier":               "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ncarriers=[\"quic\"]\n",
 	}
 	for name, s := range bad {
 		if _, err := LoadServer(write(t, s)); err == nil {
@@ -57,9 +59,11 @@ secret_files=["s"]
 
 func TestTrustProxyLoopbackAccepted(t *testing.T) {
 	for _, l := range []string{"127.0.0.1:24083", "[::1]:24083"} {
-		cfg := "[server]\nlisten=\"" + l + "\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"loopback\"\n"
-		if _, err := LoadServer(write(t, cfg)); err != nil {
-			t.Errorf("%s rejected: %v", l, err)
+		for _, mode := range []string{"loopback", "cloudflared"} {
+			cfg := "[server]\nlisten=\"" + l + "\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"" + mode + "\"\n"
+			if _, err := LoadServer(write(t, cfg)); err != nil {
+				t.Errorf("%s %s rejected: %v", mode, l, err)
+			}
 		}
 	}
 }
@@ -219,6 +223,7 @@ func TestExampleConfigsLoad(t *testing.T) {
 		"server.example.toml":              func(p string) error { _, err := LoadServer(p); return err },
 		"server-exit.example.toml":         func(p string) error { _, err := LoadServer(p); return err },
 		"server-behind-nginx.example.toml": func(p string) error { _, err := LoadServer(p); return err },
+		"server-cloudflared.example.toml":  func(p string) error { _, err := LoadServer(p); return err },
 		"client.example.toml":              func(p string) error { _, err := LoadClient(p); return err },
 		"client-entry.example.toml": func(p string) error {
 			// spki_sha256 is blank in the template; fill a placeholder pin.

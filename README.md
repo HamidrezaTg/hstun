@@ -4,12 +4,116 @@ Carries TCP over an ordinary HTTPS connection. Everything rides authenticated,
 end-to-end encrypted, multiplexed sessions, so a handful of TLS connections
 carry any number of TCP streams. It runs in two modes (see "Modes").
 
-Status: v0.2.9, pre-release, not independently reviewed. Tested with the race detector, a wedge test,
+Status: v0.2.10, pre-release, not independently reviewed. Tested with the race detector, a wedge test,
 resets, added latency and a TLS-terminating tap; both modes were also run across real networks and
 inspected with packet captures (payload never appeared in clear). The direct mode has also run
 behind nginx on a real path, with TLS resumption seen on the wire, crash recovery and the black-box
 probe (`scripts/sec-probe.py`) passing 16/16. Not yet covered: a real DPI classifier, a host reboot,
 a long soak on that layout and a third-party review. See "Security".
+
+## Install
+
+One script installs and manages everything: the binary, the config, a service account, systemd units, the nginx front and its decoy site, the certificate
+hook and the firewall rules. Run it as root on each host (`sudo -i` first):
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/HamidrezaTg/hstun/main/install.sh)
+```
+
+While the repository is **private** the script and its release need a token with read access (a fine-grained token with *Contents: read* is enough):
+
+```bash
+export GITHUB_TOKEN=...      # never paste it into a shared place
+bash <(curl -Ls -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.githubusercontent.com/HamidrezaTg/hstun/main/install.sh)
+```
+
+With no arguments it shows a menu. Everything it asks has a flag, so it also runs unattended (`--yes`). The first run installs the same script as `hstun-ctl`.
+
+### Requirements
+
+| What | Needed | Notes |
+|---|---|---|
+| OS | Linux with systemd | Debian 11+/Ubuntu 20.04+ tested; apt, dnf, yum and pacman are handled for the packages it pulls. Without systemd run the binary by hand ("Manual setup"). |
+| CPU | x86-64 or arm64 | static binary, no libc dependency |
+| Privileges | root | |
+| Always | `curl`, `tar`, `openssl` (and `jq` for the release download) | installed automatically if missing |
+| `nginx` mode | `nginx`, a domain that points at the host, a certificate | your own files (`--cert`, `--key`), or `--acme` (installs `certbot`, needs port 80 free) |
+| `direct` mode | nothing extra | makes a self-signed certificate that the entry pins; or `--domain` with `--acme`/`--cert` |
+| `cloudflared` mode | `cloudflared` with a tunnel | the installer prints the ingress lines to add; it does not edit cloudflared |
+| Firewall | `ufw` (optional) | the installer opens the port and adds a per-source cap of 64 concurrent connections; with another firewall it tells you what to open |
+| The inner proxy | something listening on `--forward-target` | hstun carries raw TCP to it, for example a VLESS/Reality inbound on `127.0.0.1` in x-ui/3x-ui or xray; **not** installed by hstun |
+| Build from source | Go >= 1.26.11 | only with `HSTUN_BUILD=1`; the installer fetches the official toolchain; Go dependencies are vendored in `vendor/` |
+| Private repository | `GITHUB_TOKEN` | not needed once the repository is public |
+
+Ports: the exit needs its public TLS port open (and port 80 for certbot), the entry needs its forward port open if clients connect to it from outside.
+
+### 1. The exit (the host abroad)
+
+```bash
+hstun-ctl exit        # or: bash <(curl ...) exit
+```
+
+Three ways to be reached (`--mode`):
+
+| mode | what it does | you need |
+|---|---|---|
+| `nginx` (recommended) | nginx owns the public TLS port, serves a static decoy site and proxies only the two secret paths to hstun on loopback; answers look like any nginx site | `--domain`, a certificate |
+| `direct` | hstun itself listens publicly; self-signed certificate pinned by the entry unless you give a real one | nothing |
+| `cloudflared` | hstun listens on loopback behind your Cloudflare Tunnel; the real client IP is read from `CF-Connecting-IP` | a tunnel; use the `chunk` carrier on the entry |
+
+Unattended examples:
+
+```bash
+# nginx front with an existing certificate; tunnelled TCP goes to a local VLESS inbound on 19990
+hstun-ctl exit --yes --mode nginx --domain tunnel.example.org --port 443 \
+  --cert /etc/letsencrypt/live/tunnel.example.org/fullchain.pem --key /etc/letsencrypt/live/tunnel.example.org/privkey.pem \
+  --forward-target 127.0.0.1:19990
+
+# the same, getting the certificate with certbot
+hstun-ctl exit --yes --mode nginx --domain tunnel.example.org --acme --email you@example.org --forward-target 127.0.0.1:19990
+
+# direct, self-signed, only one entry allowed in
+hstun-ctl exit --yes --mode direct --port 2083 --allow-from 203.0.113.7/32 --forward-target 127.0.0.1:19990
+
+# behind a Cloudflare Tunnel
+hstun-ctl exit --yes --mode cloudflared --domain tunnel.example.org --backend-port 18444 --forward-target 127.0.0.1:19990
+```
+
+It prints a **join string** (everything the entry needs except the secret) and the command for the other host. `hstun-ctl show-join` prints it again.
+
+### 2. The entry (the host in Iran)
+
+```bash
+hstun-ctl entry --join 'hstun-join:...' --secret-from root@EXIT-HOST
+```
+
+The secret is fetched over ssh straight into a 0600 file and never printed. Alternatives: `--secret-file FILE` (copy it yourself), or paste it when asked.
+Useful flags: `--carrier ws|http|chunk` (`chunk` for a path that cuts long connections, such as Cloudflare from Iran), `--connect IP:443`
+(dial a clean address instead of resolving the name), `--forward-listen 0.0.0.0:20151` (the client-facing port; the installer opens it in ufw),
+`--socks 127.0.0.1:1080`, `--conns N`, `--tls-verify spki --spki HEX`. Then point your proxy clients at `ENTRY-HOST:20151`.
+
+### Managing it
+
+| command | |
+|---|---|
+| `hstun-ctl status` | units, sessions, streams, errors |
+| `hstun-ctl logs [-f]` | journal of the instance |
+| `hstun-ctl restart` | restart the instance's units |
+| `hstun-ctl update [--all]` | download the latest release, replace the binary, restart (`--all`: every instance) |
+| `hstun-ctl show-join` / `show-secret` | pairing information (exit) |
+| `hstun-ctl uninstall [--purge]` | remove the units and firewall rules; `--purge` also deletes config, secret, decoy and, when no instance is left, the binary |
+
+Several instances can live on one host (`--name NAME` on every command): each gets `/etc/hstun-NAME`, its own units and ports.
+Installed files: `/usr/local/bin/{hstun,hstun-ctl}`, `/usr/share/hstun/` (examples, decoy), `/etc/hstun[-NAME]/` (config, secret, certificate, `install.conf`),
+`/var/www/hstun[-NAME]-decoy`, units `hstun[-NAME]-{server,client,nginx,nginx-reload}`, user `hstunsvc`.
+
+### Offline, from source, and releases
+
+- Offline: copy `hstun_VERSION_linux_ARCH.tar.gz` and run with `HSTUN_TARBALL=/path/to/it`.
+- From source: `HSTUN_BUILD=1 hstun-ctl update` (or on the first run). It downloads the source, fetches Go if needed and builds with the vendored dependencies.
+- Pin a version: `--version 0.2.10` (or `HSTUN_VERSION`). Another repository (a fork): `--repo OWNER/hstun` (or `HSTUN_REPO`).
+- Maintainers: `scripts/package.sh` builds `dist/hstun_VERSION_linux_{amd64,arm64}.tar.gz` and `SHA256SUMS`;
+  publish with `gh release create vVERSION dist/hstun_*.tar.gz dist/SHA256SUMS --repo OWNER/hstun`. The installer verifies the checksum.
 
 ## What it is, and is not
 
@@ -24,6 +128,7 @@ beat DPI by trickery.
 |---|---|---|
 | `ws` (default) | one WSS connection per slot, yamux mux inside | fast; passes Cloudflare orange cloud |
 | `http` | keep-alive POSTs: `/u` upstream chunks, `/d` long-poll downstream, sequence numbers + ack | fallback where WebSocket is not allowed; slower |
+| `chunk` | the http carrier with one TCP/TLS connection per request, each under a byte budget | paths that cut long connections (Iran to Cloudflare); about 5 Mbit/s, noisier (see "Chunk carrier") |
 
 Loopback numbers with 100 ms RTT: ws ~10 MB/s each way, http ~1.4 MB/s each way.
 Idle cost per minute: ws ~300 B, http ~6 KB.
@@ -45,7 +150,7 @@ Both modes use the same carriers, handshake and sealing. `role` defaults to
 Which one works depends on the network in between. Try direct first; if the restricted side's
 outbound connections stall or are cut, use reverse.
 
-## Quick start
+## Manual setup (without the installer)
 
 ```bash
 scripts/build.sh                                 # static linux/amd64 binary in bin/hstun
@@ -69,7 +174,7 @@ only on an exit; SOCKS5 and admin listeners must be loopback (SOCKS only with
 
 Server (`deploy/server.example.toml`): `role`, `listen`, `tls_cert`/`tls_key`, `carriers`,
 `ws_path`/`http_path` (set your own; anything else is answered by the decoy site), `decoy_dir`, `secret_files` (several
-allowed for rotation), `trust_proxy = "cloudflare"` + `cf_ranges_file` (or `"loopback"` behind a local nginx, see below)
+allowed for rotation), `trust_proxy = "cloudflare"` + `cf_ranges_file` (or `"loopback"` behind a local nginx, or `"cloudflared"` behind a local cloudflared, see below)
 (`CF-Connecting-IP` is trusted only from those ranges), connection and auth-failure
 limits (`max_conns`, `max_conns_per_ip`, `auth_fail_per_min_per_ip`,
 `forward_max_conns_per_ip` for the entry forward/SOCKS ports, optional
@@ -220,6 +325,7 @@ reports as reachable, and the scripts refuse to run with it.
 ```bash
 scripts/test.sh            # vet + race tests + short fuzz (about 2 minutes)
 scripts/test.sh -short     # skips the slow tests (wedge, throughput, 60 s idle)
+scripts/test-install.sh    # installer in a temp dir: exit + entry from the release tarball, echo through the tunnel, --purge (needs scripts/package.sh first)
 scripts/build.sh           # static build and sha256
 ```
 
@@ -229,6 +335,14 @@ scripts/build.sh           # static build and sha256
 5 MB down and 2 MB up through the SOCKS port; `scripts/wedge-host.py` holds
 half-dead connections against a live server while timing a legitimate request;
 `scripts/sec-probe.py` sends hostile input an unauthenticated client could send.
+
+## Behind cloudflared
+
+For an exit reached through a Cloudflare Tunnel run hstun on loopback and point the tunnel's ingress at it (`https://127.0.0.1:PORT` with `noTLSVerify`
+or `http://` with empty `tls_cert`/`tls_key`). `trust_proxy = "cloudflared"` reads the real client IP from `CF-Connecting-IP`, only from a loopback peer
+(the config refuses a non-loopback `listen` and `allow_from` in this mode), so `auth_fail_per_min_per_ip` and the per-IP limits work per client instead of
+treating everyone as 127.0.0.1. See `deploy/server-cloudflared.example.toml`. Pair it with `carrier = "chunk"` (README "Chunk carrier") for clients on a path that
+cuts long connections to Cloudflare, or with `ws` where long connections survive.
 
 ## Chunk carrier: when a path cuts long connections
 
