@@ -64,7 +64,11 @@ func New(cfg *config.ClientFile, logger *slog.Logger) (*Client, error) {
 	if net.ParseIP(host) != nil && cfg.Client.SNI == "" {
 		// Go sends no SNI for an IP literal, and some paths reset TLS without SNI
 		// (seen on one real path: curl without SNI was reset, with SNI it worked).
-		logger.Warn("server is an IP address, so no TLS SNI is sent; if connections are reset right after connecting, set sni = \"some.hostname\"", "server", cfg.Client.Server)
+		if cfg.Client.TLSVerify == "spki" {
+			logger.Info("server is an IP address, so no TLS SNI is sent (normal with a pinned certificate)", "server", cfg.Client.Server)
+		} else {
+			logger.Warn("server is an IP address, so no TLS SNI is sent; if connections are reset right after connecting, set sni = \"some.hostname\"", "server", cfg.Client.Server)
+		}
 	}
 	ping, _ := time.ParseDuration(cfg.Client.Ping)
 	idle, _ := time.ParseDuration(cfg.Client.IdleTimeout)
