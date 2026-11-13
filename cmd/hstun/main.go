@@ -20,7 +20,7 @@ import (
 	"hstun/internal/server"
 )
 
-var version = "0.2.11"
+var version = "0.2.12"
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
