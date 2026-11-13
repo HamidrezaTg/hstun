@@ -18,7 +18,18 @@ import (
 // and it stays under Cloudflare's ~100 s idle timeout.
 const ReadIdle = 80 * time.Second
 
-func config(keepAlive time.Duration) *yamux.Config {
+// Option adjusts a session's yamux settings.
+type Option func(*yamux.Config)
+
+// SlowCarrier is for carriers that move data as request/response chunks (http,
+// chunk). Their send buffer can legitimately need longer than the 10 s that
+// suits a WebSocket to drain, and yamux would otherwise kill the whole session
+// with "connection write timeout" while the carrier is only slow.
+func SlowCarrier() Option {
+	return func(c *yamux.Config) { c.ConnectionWriteTimeout = 45 * time.Second }
+}
+
+func config(keepAlive time.Duration, opts ...Option) *yamux.Config {
 	c := yamux.DefaultConfig()
 	c.AcceptBacklog = 64
 	c.EnableKeepAlive = keepAlive > 0
@@ -30,6 +41,9 @@ func config(keepAlive time.Duration) *yamux.Config {
 	c.StreamOpenTimeout = 10 * time.Second
 	c.StreamCloseTimeout = 30 * time.Second
 	c.LogOutput = io.Discard
+	for _, o := range opts {
+		o(c)
+	}
 	return c
 }
 
@@ -41,13 +55,13 @@ func wrap(c net.Conn) net.Conn { return &netx.IdleConn{Conn: c, Idle: ReadIdle} 
 // two opens streams (entry) or serves them (exit) is independent of this.
 
 // Listener wraps a carrier conn the local side accepted.
-func Listener(c net.Conn, keepAlive time.Duration) (*yamux.Session, error) {
-	return yamux.Client(wrap(c), config(keepAlive))
+func Listener(c net.Conn, keepAlive time.Duration, opts ...Option) (*yamux.Session, error) {
+	return yamux.Client(wrap(c), config(keepAlive, opts...))
 }
 
 // Dialer wraps a carrier conn the local side dialed.
-func Dialer(c net.Conn, keepAlive time.Duration) (*yamux.Session, error) {
-	return yamux.Server(wrap(c), config(keepAlive))
+func Dialer(c net.Conn, keepAlive time.Duration, opts ...Option) (*yamux.Session, error) {
+	return yamux.Server(wrap(c), config(keepAlive, opts...))
 }
 
 // Stream is a yamux stream that can half-close. yamux's Close only sends a

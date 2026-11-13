@@ -35,15 +35,27 @@ const (
 	hdrSeq = "X-Hs-Seq"
 	hdrAck = "X-Hs-Ack"
 	hdrTag = "X-Hs-Tag"
+	hdrMax = "X-Hs-Mx" // chunk mode: payload budget the client wants per downstream response
 
-	upChunk   = 64 << 10  // largest upstream body
-	downChunk = 128 << 10 // largest downstream response payload
-	window    = 32        // reorder window in chunks
-	txLimit   = 2 << 20   // unsent + unacked bytes before Write blocks
-	rxLimit   = 1 << 20   // undelivered bytes before we push back
-	hold      = 50 * time.Second
-	rto       = 3 * time.Second
-	sessIdle  = 90 * time.Second
+	upChunk      = 64 << 10  // largest upstream body
+	downChunk    = 128 << 10 // largest downstream response payload
+	minDownChunk = 4 << 10   // smallest budget a chunk-mode client may ask for
+	window       = 32        // reorder window in chunks
+	txLimit      = 2 << 20   // unsent + unacked bytes before Write blocks
+	rxLimit      = 1 << 20   // undelivered bytes before we push back
+	hold         = 50 * time.Second
+	// Long-poll holds for chunk-mode clients. The client gives a poll up after 15 s;
+	// the server must always answer first. A poll the client has abandoned can stay
+	// alive at the origin (a CDN does not pass a client disconnect on promptly) and
+	// would swallow the next downstream data, so while the session is busy the hold is
+	// short and a healthy client never cancels a poll.
+	chunkHoldBusy = 3 * time.Second
+	chunkHoldIdle = 10 * time.Second
+	chunkBusyFor  = 10 * time.Second        // a session is busy this long after it last moved data
+	chunkTxLimit  = 192 << 10               // chunk-mode send buffer in bytes, about a second of traffic
+	chunkRTO      = 1500 * time.Millisecond // chunk mode resends an unacked downstream chunk this soon (3 s otherwise)
+	rto           = 3 * time.Second
+	sessIdle      = 90 * time.Second
 
 	maxPending      = 256 // pending handshakes
 	maxPendingPerIP = 8   // pending handshakes one source may hold
@@ -148,6 +160,7 @@ type sconn struct {
 	rxLen    int
 	tx       []byte
 	inflight int
+	limit    int // unsent + unacked bytes before Write blocks (txLimit, or chunkTxLimit)
 	closed   bool
 	eof      bool
 	rd, wd   deadline
@@ -158,7 +171,16 @@ type sconn struct {
 }
 
 func newSconn(local, remote string, onClose func()) *sconn {
-	return &sconn{bc: newBcast(), rd: newDeadline(), wd: newDeadline(), local: addr(local), remote: addr(remote), onClose: onClose}
+	return &sconn{bc: newBcast(), rd: newDeadline(), wd: newDeadline(), local: addr(local), remote: addr(remote), onClose: onClose, limit: txLimit}
+}
+
+// setTxLimit lowers the send buffer. A chunk-mode carrier moves a few Mbit/s, so
+// the default 2 MB of queued bytes is seconds of delay in front of every control
+// frame (window updates, acks) and starves the opposite direction.
+func (c *sconn) setTxLimit(n int) {
+	c.mu.Lock()
+	c.limit = n
+	c.mu.Unlock()
 }
 
 func (c *sconn) Read(p []byte) (int, error) {
@@ -201,7 +223,7 @@ func (c *sconn) Write(p []byte) (int, error) {
 			c.mu.Unlock()
 			return 0, errClosed
 		}
-		if len(c.tx)+c.inflight < txLimit {
+		if len(c.tx)+c.inflight < c.limit {
 			c.tx = append(c.tx, p...)
 			c.mu.Unlock()
 			c.bc.Signal()

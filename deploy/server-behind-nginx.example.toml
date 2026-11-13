@@ -4,8 +4,8 @@
 role         = "exit"
 listen       = "127.0.0.1:24083"          # loopback only: required by trust_proxy = "loopback"
 trust_proxy  = "loopback"                 # real client IP from X-Real-IP (set by nginx); no allow_from in this mode
-tls_cert     = "/etc/hstun/cert.pem"      # backend TLS on loopback: any certificate, nginx does not verify it
-tls_key      = "/etc/hstun/key.pem"
+# no tls_cert / tls_key: with trust_proxy = "loopback" hstun serves plain HTTP on loopback (nginx terminates TLS).
+# A second TLS layer on loopback measured 1.5-2x slower downloads on a 1 vCPU host; set both (a self-signed pair) only if you need it.
 carriers     = ["ws", "http"]
 ws_path      = "/CHANGE-ws-path"          # must match nginx
 http_path    = "/CHANGE-http-path"        # must match nginx

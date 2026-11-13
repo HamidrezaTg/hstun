@@ -364,3 +364,74 @@ func TestWSReconnectsAfterReset(t *testing.T) {
 func tlsInsecure() *tls.Config {
 	return &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"http/1.1"}}
 }
+
+// A path that cuts every connection after a small byte budget per direction
+// (what Iran does to Cloudflare customer names): the plain http carrier, which
+// reuses long connections and sends 64 KB bodies, stalls; the chunk carrier,
+// one connection per small request, carries the data and never hits the cut.
+func TestChunkCarrierUnderPerConnectionBudget(t *testing.T) {
+	e := startServer(t, []string{"ws", "http"})
+	proxy, cuts := testutil.BudgetProxy(t, e.tunnel, 24<<10, 48<<10)
+	e.startClientPing(t, "chunk", 1, proxy, e.certPath, "2s")
+	if err := roundTrip(e.fwd, 1<<20); err != nil {
+		t.Fatalf("1 MB through the chunk carrier under the budget: %v", err)
+	}
+	if err := roundTrip(e.fwd, 64<<10); err != nil {
+		t.Fatalf("second transfer: %v", err)
+	}
+	if n := cuts.Load(); n != 0 {
+		t.Fatalf("chunk carrier exceeded the per-connection budget on %d connections", n)
+	}
+}
+
+func TestBudgetProxyBreaksThePlainHTTPCarrier(t *testing.T) {
+	e := startServer(t, []string{"ws", "http"})
+	proxy, cuts := testutil.BudgetProxy(t, e.tunnel, 24<<10, 48<<10)
+	e.startClientPing(t, "http", 1, proxy, e.certPath, "2s")
+	done := make(chan error, 1)
+	go func() { done <- roundTrip(e.fwd, 1<<20) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("plain http carrier unexpectedly got 1 MB through a 24 KB per-connection budget")
+		}
+	case <-time.After(8 * time.Second):
+	}
+	if cuts.Load() == 0 {
+		t.Fatal("the budget proxy never cut a connection, so it proves nothing")
+	}
+}
+
+func TestChunkCarrierConcurrentStreams(t *testing.T) {
+	e := startServer(t, []string{"ws", "http"})
+	proxy, cuts := testutil.BudgetProxy(t, e.tunnel, 24<<10, 48<<10)
+	e.startClientPing(t, "chunk", 1, proxy, e.certPath, "2s")
+	errc := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		go func() { errc <- roundTrip(e.fwd, 2<<20) }()
+	}
+	for i := 0; i < 4; i++ {
+		if err := <-errc; err != nil {
+			t.Fatalf("stream %d of 4 concurrent 2 MB transfers: %v (cuts=%d)", i, err, cuts.Load())
+		}
+	}
+	if n := cuts.Load(); n != 0 {
+		t.Fatalf("budget exceeded on %d connections", n)
+	}
+}
+
+// The real path adds latency and silently eats a few percent of connections.
+func TestChunkCarrierFlakyPath(t *testing.T) {
+	e := startServer(t, []string{"ws", "http"})
+	proxy, _ := testutil.FlakyBudgetProxy(t, e.tunnel, 24<<10, 48<<10, 5, 40*time.Millisecond)
+	e.startClientPing(t, "chunk", 1, proxy, e.certPath, "2s")
+	errc := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		go func() { errc <- roundTrip(e.fwd, 1<<20) }()
+	}
+	for i := 0; i < 4; i++ {
+		if err := <-errc; err != nil {
+			t.Fatalf("stream %d of 4 concurrent 1 MB transfers over a flaky path: %v", i, err)
+		}
+	}
+}

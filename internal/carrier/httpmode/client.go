@@ -25,6 +25,22 @@ const (
 	upWorkers   = 3
 	downPollers = 2
 	failAfter   = 60 * time.Second
+
+	// Chunk mode defaults. Measured from Iran to a Cloudflare customer name:
+	// about 20 KB upstream and 48 KB downstream per connection get through, more
+	// is cut. These keep a safe margin below both.
+	DefaultChunkUp   = 12 << 10
+	DefaultChunkDown = 32 << 10
+	DefaultChunkPar  = 8
+
+	// A healthy chunk request takes 0.2-0.6 s (measured through Cloudflare), while a
+	// connection the path swallows never answers. A swallowed chunk holds up every
+	// chunk behind it (delivery is in order), so these are kept short.
+	chunkAttempt     = 3 * time.Second  // one request must finish within this in chunk mode
+	chunkBodyStall   = 4 * time.Second  // a response body must complete this soon after its headers
+	chunkConnect     = 3 * time.Second  // dial and TLS handshake
+	chunkPollTimeout = 15 * time.Second // a long-poll the server never answers frees its poller after this (server holds are shorter)
+	chunkHedge       = time.Second      // an upstream chunk not answered by now is also sent on a second connection
 )
 
 type clientConn struct {
@@ -39,6 +55,11 @@ type clientConn struct {
 
 	upSeq uint64
 
+	chunk   bool          // short-connection mode
+	upSize  int           // largest upstream body
+	downMax int           // downstream payload budget asked of the server (chunk mode)
+	attempt time.Duration // timeout of one upstream request
+
 	rmu      sync.Mutex
 	recvNext uint64
 	recvBuf  map[uint64][]byte
@@ -51,6 +72,16 @@ func Dial(ctx context.Context, o carrier.Options, key []byte, name string) (net.
 	var d net.Dialer
 	d.Timeout = 10 * time.Second
 	d.KeepAlive = netx.KeepAlive
+	nUp, nDown, upSize, downMax, attempt := upWorkers, downPollers, upChunk, 0, 30*time.Second
+	tlsTimeout := 10 * time.Second
+	if o.Chunk {
+		par := orDefault(o.ChunkPar, DefaultChunkPar)
+		nUp, nDown = par, par
+		upSize = min(orDefault(o.ChunkUp, DefaultChunkUp), upChunk)
+		downMax = min(orDefault(o.ChunkDown, DefaultChunkDown), downChunk)
+		attempt = chunkAttempt
+		d.Timeout, tlsTimeout = chunkConnect, chunkConnect
+	}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if o.Connect != "" {
@@ -63,12 +94,13 @@ func Dial(ctx context.Context, o carrier.Options, key []byte, name string) (net.
 			return c, err
 		},
 		TLSClientConfig:     o.TLS.Clone(),
-		TLSHandshakeTimeout: 10 * time.Second,
+		TLSHandshakeTimeout: tlsTimeout,
+		DisableKeepAlives:   o.Chunk, // one connection per request
 		ForceAttemptHTTP2:   false,
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
 		DisableCompression:  true,
-		MaxIdleConnsPerHost: upWorkers + downPollers + 2,
-		MaxConnsPerHost:     upWorkers + downPollers + 2,
+		MaxIdleConnsPerHost: nUp + nDown + 2,
+		MaxConnsPerHost:     nUp + nDown + 2,
 		IdleConnTimeout:     90 * time.Second,
 	}
 	hc := &http.Client{Transport: carrier.WithUserAgent(tr, o.UserAgent)}
@@ -106,19 +138,30 @@ func Dial(ctx context.Context, o carrier.Options, key []byte, name string) (net.
 	c := &clientConn{
 		hc: hc, base: base, sid: sid, sidHex: hex.EncodeToString(sid), sk: res.SessionKey,
 		ctx: cctx, cancel: cancel, recvNext: 1, recvBuf: map[uint64][]byte{}, lastData: time.Now(),
+		chunk: o.Chunk, upSize: upSize, downMax: downMax, attempt: attempt,
 	}
 	c.sconn = newSconn("hstun-http-client", o.Server, func() {
 		cancel()
 		go c.sendClose()
 		tr.CloseIdleConnections()
 	})
-	for i := 0; i < upWorkers; i++ {
+	if o.Chunk {
+		c.sconn.setTxLimit(chunkTxLimit)
+	}
+	for i := 0; i < nUp; i++ {
 		go c.upWorker()
 	}
-	for i := 0; i < downPollers; i++ {
+	for i := 0; i < nDown; i++ {
 		go c.poller(i)
 	}
 	return c, res.SessionKey, nil
+}
+
+func orDefault(v, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return v
 }
 
 // post sends a small handshake request and returns the response headers and
@@ -164,6 +207,9 @@ func (c *clientConn) newReq(ctx context.Context, path string, body []byte, seq, 
 	}
 	if path == pathDown {
 		req.Header.Set(hdrAck, strconv.FormatUint(ack, 10))
+		if c.downMax > 0 {
+			req.Header.Set(hdrMax, strconv.Itoa(c.downMax))
+		}
 	}
 	req.Header.Set(hdrTag, hex.EncodeToString(reqTag(c.sk, path, c.sid, seq, ack, body)))
 	req.Header.Set("Content-Type", "application/octet-stream")
@@ -196,7 +242,7 @@ func jitter(d time.Duration) time.Duration { return d/2 + time.Duration(rand.Int
 
 func (c *clientConn) upWorker() {
 	for {
-		data, seq, closed, wake := c.nextChunk(upChunk, &c.upSeq)
+		data, seq, closed, wake := c.nextChunk(c.upSize, &c.upSeq)
 		if closed {
 			return
 		}
@@ -220,10 +266,13 @@ func (c *clientConn) upWorker() {
 // sequence number, so a resend after a lost response is harmless. It returns
 // false when the session is dead.
 func (c *clientConn) sendUp(seq uint64, data []byte) bool {
+	if c.chunk {
+		return c.sendUpHedged(seq, data)
+	}
 	backoff := 200 * time.Millisecond
 	give := time.Now().Add(failAfter)
 	for c.ctx.Err() == nil {
-		ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(c.ctx, c.attempt)
 		req, err := c.newReq(ctx, pathUp, data, seq, 0)
 		if err == nil {
 			var resp *http.Response
@@ -251,11 +300,94 @@ func (c *clientConn) sendUp(seq uint64, data []byte) bool {
 		if !sleepCtx(c.ctx, jitter(backoff)) {
 			return false
 		}
-		if backoff < 3*time.Second {
+		if backoff < 3*time.Second && !c.chunk {
 			backoff *= 2
 		}
 	}
 	return false
+}
+
+// sendUpHedged is sendUp for chunk mode. A request the path swallows never
+// answers, and the chunks behind it cannot be delivered in order until it does,
+// so after chunkHedge the same chunk (same sequence number, deduplicated by the
+// server) goes out on a second connection; the first answer wins.
+func (c *clientConn) sendUpHedged(seq uint64, data []byte) bool {
+	const (
+		ok = iota + 1
+		busy
+		fatal
+		failed
+	)
+	results := make(chan int, 16)
+	ctx, cancel := context.WithCancel(c.ctx)
+	defer cancel() // abandons any attempt still in flight once one has answered
+	attempt := func() {
+		actx, acancel := context.WithTimeout(ctx, c.attempt)
+		defer acancel()
+		req, err := c.newReq(actx, pathUp, data, seq, 0)
+		if err != nil {
+			results <- failed
+			return
+		}
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			results <- failed
+			return
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusNoContent:
+			results <- ok
+		case http.StatusTooManyRequests:
+			results <- busy
+		case http.StatusGone, http.StatusForbidden, http.StatusBadRequest, http.StatusRequestEntityTooLarge:
+			results <- fatal
+		default:
+			results <- failed
+		}
+	}
+	give := time.Now().Add(failAfter)
+	outstanding := 1
+	go attempt()
+	hedge := time.NewTimer(chunkHedge)
+	defer hedge.Stop()
+	for {
+		select {
+		case r := <-results:
+			outstanding--
+			switch r {
+			case ok:
+				return true
+			case fatal:
+				return false
+			}
+			if outstanding > 0 {
+				continue
+			}
+			if time.Now().After(give) {
+				return false
+			}
+			wait := jitter(100 * time.Millisecond)
+			if r == busy {
+				wait = jitter(150 * time.Millisecond)
+			}
+			if !sleepCtx(c.ctx, wait) {
+				return false
+			}
+			outstanding++
+			go attempt()
+			hedge.Reset(chunkHedge)
+		case <-hedge.C:
+			if outstanding < 3 {
+				outstanding++
+				go attempt()
+			}
+			hedge.Reset(chunkHedge)
+		case <-c.ctx.Done():
+			return false
+		}
+	}
 }
 
 func (c *clientConn) ackValue() uint64 {
@@ -308,7 +440,7 @@ func (c *clientConn) poller(i int) {
 			if !sleepCtx(c.ctx, jitter(backoff)) {
 				return
 			}
-			if backoff < 3*time.Second {
+			if backoff < 3*time.Second && !c.chunk {
 				backoff *= 2
 			}
 		}
@@ -316,7 +448,11 @@ func (c *clientConn) poller(i int) {
 }
 
 func (c *clientConn) pollOnce() (int, error) {
-	ctx, cancel := context.WithTimeout(c.ctx, hold+20*time.Second)
+	pollTimeout := hold + 20*time.Second
+	if c.chunk {
+		pollTimeout = chunkPollTimeout
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, pollTimeout)
 	defer cancel()
 	ack := c.ackValue()
 	req, err := c.newReq(ctx, pathDown, nil, 0, ack)
@@ -328,6 +464,12 @@ func (c *clientConn) pollOnce() (int, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+	if c.chunk {
+		// A connection that stalls mid-response (the path cut it) must not hold a
+		// poller for the whole hold interval; the server resends unacked chunks.
+		stall := time.AfterFunc(chunkBodyStall, cancel)
+		defer stall.Stop()
+	}
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return resp.StatusCode, nil

@@ -1,0 +1,30 @@
+# hstun client, CHUNK carrier: the http carrier with one TCP/TLS connection per request, every request
+# under a small byte budget. Use it only where a path cuts any connection after a few tens of KB
+# (measured 2026-11-13 from a client host in Iran to every Cloudflare customer hostname: about 20 KB upstream and 48 KB
+# downstream per connection get through). The server needs the "http" carrier enabled; it needs no other change.
+# Slower than ws (about 5 Mbit/s down and 7-10 Mbit/s up measured through Cloudflare) and noisier on the wire
+# (many short TLS connections), so keep ws wherever ws works.
+[client]
+role        = "entry"
+server      = "tunnel.example.org:443"   # the Cloudflare-proxied hostname that reaches the exit
+connect     = "104.21.43.22:443"         # RECOMMENDED: a Cloudflare IPv4 that works from your side. IPv6 was blackholed and 188.114.98.0
+                                         # lost ~15% of connections from the test host; resolver-chosen addresses can land on those.
+carrier     = "chunk"
+http_path   = "/CHANGE-http-path"        # must match the exit; CHANGE from the public default
+ws_path     = "/CHANGE-ws-path"
+conns       = 1                          # one session already runs chunk_parallel connections
+chunk_parallel   = 8                     # uploads and downloads in flight each (1..32); more did not measure faster
+# chunk_up_bytes   = 12288               # upstream body per connection (default 12288; the path passed ~20 KB)
+# chunk_down_bytes = 32768               # downstream payload per connection (default 32768; the path passed ~48 KB)
+secret_file = "/etc/hstun/secret"
+name        = "client"
+tls_verify  = "system"
+ping        = "25s"
+idle_timeout = "10m"
+max_streams_per_session = 256
+forward_max_conns_per_ip = 64
+admin_listen = "127.0.0.1:9110"
+
+[[forward]]
+name   = "x1"                            # must match a forward name on the exit
+listen = "127.0.0.1:20151"

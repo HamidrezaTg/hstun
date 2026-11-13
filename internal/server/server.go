@@ -116,14 +116,17 @@ func (s *Server) hasCarrier(name string) bool {
 
 // Listen binds every listener, so a busy port is reported before serving.
 func (s *Server) Listen() error {
-	cert, err := tls.LoadX509KeyPair(s.cfg.Server.TLSCert, s.cfg.Server.TLSKey)
-	if err != nil {
-		return err
-	}
-	tc := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{"http/1.1"},
+	var tc *tls.Config // nil: plain HTTP on loopback behind a local proxy (trust_proxy = "loopback")
+	if s.cfg.Server.TLSCert != "" {
+		cert, err := tls.LoadX509KeyPair(s.cfg.Server.TLSCert, s.cfg.Server.TLSKey)
+		if err != nil {
+			return err
+		}
+		tc = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"http/1.1"},
+		}
 	}
 	raw, err := net.Listen("tcp", s.cfg.Server.Listen)
 	if err != nil {
@@ -135,7 +138,11 @@ func (s *Server) Listen() error {
 		return err
 	}
 	lim := netx.NewLimitListener(netx.TunedListener{Listener: guard}, s.cfg.Server.MaxConns)
-	s.mainLn = tls.NewListener(lim, tc)
+	if tc != nil {
+		s.mainLn = tls.NewListener(lim, tc)
+	} else {
+		s.mainLn = lim
+	}
 
 	if s.entry != nil {
 		if err := s.entry.Listen(); err != nil {
@@ -287,7 +294,11 @@ func (s *Server) runSession(c net.Conn, res *proto.ServerResult, ip string) {
 		s.log.Error("seal setup failed", "err", err)
 		return
 	}
-	ms, err := mux.Listener(sealed, 25*time.Second)
+	var mopts []mux.Option
+	if res.Carrier == proto.CarrierHTTP {
+		mopts = append(mopts, mux.SlowCarrier())
+	}
+	ms, err := mux.Listener(sealed, 25*time.Second, mopts...)
 	if err != nil {
 		s.log.Error("mux setup failed", "err", err)
 		return

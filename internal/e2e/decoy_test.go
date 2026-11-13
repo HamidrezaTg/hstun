@@ -70,3 +70,33 @@ func TestServerLooksLikeAWebsite(t *testing.T) {
 		}
 	}
 }
+
+// Behind a local proxy the server may speak plain HTTP on loopback (no TLS
+// certificate). It must serve the decoy and refuse the tunnel paths the same way.
+func TestPlainBackendBehindLoopbackProxy(t *testing.T) {
+	e := startServerOpt(t, []string{"ws"}, func(c *config.ServerFile) {
+		c.Server.TLSCert, c.Server.TLSKey = "", ""
+		c.Server.TrustProxy = "loopback"
+	})
+	hc := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := hc.Get("http://" + e.tunnel + "/")
+	if err != nil {
+		t.Fatalf("plain GET: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(b), "Welcome") {
+		t.Fatalf("plain backend / : %d %q", resp.StatusCode, b)
+	}
+	resp, err = hc.Get("http://" + e.tunnel + "/hs/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("ws path without upgrade on the plain backend: %d, want 404", resp.StatusCode)
+	}
+	if _, err := hc.Get("https://" + e.tunnel + "/"); err == nil {
+		t.Fatal("TLS handshake unexpectedly succeeded against a plain backend")
+	}
+}
