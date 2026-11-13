@@ -71,6 +71,24 @@ func TestClientIPLoopbackProxy(t *testing.T) {
 	}
 }
 
+func TestClientIPCloudflaredFromLoopback(t *testing.T) {
+	s := &Server{cf: loopbackRanges(), proxyHeader: "CF-Connecting-IP"}
+	mk := func(remote, name, hdr string) *http.Request {
+		r := &http.Request{RemoteAddr: remote, Header: http.Header{}}
+		r.Header.Set(name, hdr)
+		return r
+	}
+	if got := s.clientIPOf(mk("127.0.0.1:4000", "CF-Connecting-IP", "203.0.113.9")); got != "203.0.113.9" {
+		t.Errorf("CF-Connecting-IP from the local cloudflared ignored: %s", got)
+	}
+	if got := s.clientIPOf(mk("198.51.100.4:4000", "CF-Connecting-IP", "203.0.113.9")); got != "198.51.100.4" {
+		t.Errorf("spoofed header trusted from a non-loopback peer: %s", got)
+	}
+	if got := s.clientIPOf(mk("127.0.0.1:4000", "X-Real-IP", "203.0.113.9")); got != "127.0.0.1" {
+		t.Errorf("the nginx header is trusted in cloudflared mode: %s", got)
+	}
+}
+
 func TestLoadRangesRejectsGarbage(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "bad.txt")
 	_ = os.WriteFile(p, []byte("not-a-cidr\n"), 0o600)

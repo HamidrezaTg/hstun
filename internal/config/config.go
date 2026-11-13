@@ -170,8 +170,8 @@ func (f *ServerFile) validate() error {
 	if (s.TLSCert == "") != (s.TLSKey == "") {
 		return errors.New("server: tls_cert and tls_key must be set together")
 	}
-	if s.TLSCert == "" && s.TrustProxy != "loopback" {
-		return errors.New("server: tls_cert and tls_key are required; they may be left empty only with trust_proxy=loopback, which serves plain HTTP on a loopback address for a local proxy")
+	if s.TLSCert == "" && s.TrustProxy != "loopback" && s.TrustProxy != "cloudflared" {
+		return errors.New("server: tls_cert and tls_key are required; they may be left empty only with trust_proxy=loopback or cloudflared, which serve plain HTTP on a loopback address for a local proxy")
 	}
 	if len(s.SecretFiles) == 0 {
 		return errors.New("server: secret_files is required")
@@ -194,14 +194,15 @@ func (f *ServerFile) validate() error {
 	}
 	switch s.TrustProxy {
 	case "", "cloudflare":
-	case "loopback":
-		// Behind a local web server every peer is 127.0.0.1 and X-Real-IP carries the
-		// real address, so the header must only ever be believed from a loopback peer.
+	case "loopback", "cloudflared":
+		// Behind a local web server (nginx: X-Real-IP) or a local cloudflared
+		// (CF-Connecting-IP) every peer is 127.0.0.1 and a header carries the real
+		// address, so the header must only ever be believed from a loopback peer.
 		if !loopbackListen(s.Listen) {
-			return errors.New("server: trust_proxy=loopback needs listen on a loopback address such as 127.0.0.1:24083")
+			return fmt.Errorf("server: trust_proxy=%s needs listen on a loopback address such as 127.0.0.1:24083", s.TrustProxy)
 		}
 		if len(s.AllowFrom) > 0 {
-			return errors.New("server: allow_from cannot be combined with trust_proxy=loopback (every peer is the proxy); filter in the proxy or the firewall")
+			return fmt.Errorf("server: allow_from cannot be combined with trust_proxy=%s (every peer is the proxy); filter in the proxy or the firewall", s.TrustProxy)
 		}
 	default:
 		return fmt.Errorf("server: trust_proxy %q unsupported", s.TrustProxy)

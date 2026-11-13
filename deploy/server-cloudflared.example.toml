@@ -1,0 +1,31 @@
+# hstun server (exit) behind a local cloudflared tunnel. cloudflared (ingress: service https://127.0.0.1:18444 with noTLSVerify, or
+# http:// with empty tls_cert) forwards requests from the Cloudflare edge to this loopback listener. Pairs with the chunk or ws client.
+# trust_proxy = "cloudflared": the real client IP is read from CF-Connecting-IP, and only from a loopback peer (the local cloudflared),
+# so per-IP limits and the failed-handshake limiter work per real client instead of lumping everyone as 127.0.0.1.
+[server]
+role         = "exit"
+listen       = "127.0.0.1:18444"          # loopback only: required by trust_proxy = "cloudflared"
+trust_proxy  = "cloudflared"
+tls_cert     = "/etc/hstun-cf/cert.pem"   # any certificate (cloudflared does not verify it); leave both empty to serve plain HTTP
+tls_key      = "/etc/hstun-cf/key.pem"
+carriers     = ["ws", "http"]             # the chunk client uses the http endpoints
+ws_path      = "/CHANGE-ws-path"
+http_path    = "/CHANGE-http-path"
+secret_files = ["/etc/hstun-cf/secret"]
+
+max_conns       = 512
+max_conns_per_ip = 64                     # loopback peers (cloudflared) are exempt; the cap applies per direct peer only
+max_sessions_per_key    = 16
+max_streams_per_session = 256
+auth_fail_per_min_per_ip = 10             # counted per real client IP
+idle_timeout    = "10m"
+admin_listen    = "127.0.0.1:9112"
+
+[[forward]]
+name   = "x1"
+target = "127.0.0.1:19980"                # a loopback VLESS/Reality inbound in the panel
+
+[socks_exit]
+enabled      = false
+deny_private = true
+allow_ports  = []

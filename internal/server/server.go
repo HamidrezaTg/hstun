@@ -101,6 +101,8 @@ func New(cfg *config.ServerFile, logger *slog.Logger) (*Server, error) {
 		s.proxyHeader = "CF-Connecting-IP"
 	case "loopback":
 		s.cf, s.proxyHeader = loopbackRanges(), "X-Real-IP"
+	case "cloudflared":
+		s.cf, s.proxyHeader = loopbackRanges(), "CF-Connecting-IP"
 	}
 	return s, nil
 }
