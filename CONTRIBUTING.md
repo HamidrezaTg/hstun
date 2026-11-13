@@ -44,3 +44,9 @@ Go dependencies are vendored (`go mod vendor` after changing `go.mod`); update `
 
 Plain transport engineering: real TLS and ordinary HTTP/WebSocket framing. No protocol imitation, no browser TLS-fingerprint copying, no fake URL rotation or DPI tricks.
 Making the server look like an ordinary website (decoy, ALPN, resumption) is in scope. Every new read, write or handshake needs a deadline and a length cap; new listeners are loopback by default.
+
+## CI and releases
+
+`.github/workflows/ci.yml` runs vet, build, the short tests, shellcheck, the installer tests and `govulncheck` on every push and pull request.
+Pushing a tag `vX.Y.Z` (matching `var version` in `cmd/hstun/main.go`) runs `.github/workflows/release.yml`: tests, `scripts/package.sh`, a build provenance
+attestation for the tarballs (`gh attestation verify hstun_X.Y.Z_linux_amd64.tar.gz --repo OWNER/hstun`), and the GitHub release with `SHA256SUMS`. Dependabot proposes Go module and Action updates weekly.

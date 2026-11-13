@@ -58,6 +58,9 @@ type Server struct {
 
 	httpSrv *httpmode.Server
 
+	certs   *certReloader // nil when serving plain HTTP behind a local proxy
+	started time.Time
+
 	// counters for /stats
 	hsOK, hsFail atomic.Int64
 }
@@ -77,13 +80,14 @@ func New(cfg *config.ServerFile, logger *slog.Logger) (*Server, error) {
 	}
 	idle, _ := time.ParseDuration(cfg.Server.IdleTimeout)
 	s := &Server{
-		cfg:  cfg,
-		log:  logger,
-		kr:   kr,
-		hub:  entry.NewHub(cfg.Server.MaxSessionsPerKey, cfg.Server.MaxStreamsPerSession),
-		fail: newFailLimiter(cfg.Server.AuthFailPerMinPerIP),
-		idle: idle,
-		ctx:  context.Background(),
+		cfg:     cfg,
+		log:     logger,
+		started: time.Now(),
+		kr:      kr,
+		hub:     entry.NewHub(cfg.Server.MaxSessionsPerKey, cfg.Server.MaxStreamsPerSession),
+		fail:    newFailLimiter(cfg.Server.AuthFailPerMinPerIP),
+		idle:    idle,
+		ctx:     context.Background(),
 	}
 	if cfg.Server.Role == config.RoleExit {
 		s.exit = exit.New(cfg.Forward, cfg.SocksExit, idle, cfg.Server.MaxStreamsPerSession)
@@ -120,14 +124,15 @@ func (s *Server) hasCarrier(name string) bool {
 func (s *Server) Listen() error {
 	var tc *tls.Config // nil: plain HTTP on loopback behind a local proxy (trust_proxy = "loopback")
 	if s.cfg.Server.TLSCert != "" {
-		cert, err := tls.LoadX509KeyPair(s.cfg.Server.TLSCert, s.cfg.Server.TLSKey)
+		certs, err := newCertReloader(s.cfg.Server.TLSCert, s.cfg.Server.TLSKey, s.log, certCheckEvery)
 		if err != nil {
 			return err
 		}
+		s.certs = certs
 		tc = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-			NextProtos:   []string{"http/1.1"},
+			GetCertificate: certs.get, // a renewed certificate is picked up without a restart
+			MinVersion:     tls.VersionTLS12,
+			NextProtos:     []string{"http/1.1"},
 		}
 	}
 	raw, err := net.Listen("tcp", s.cfg.Server.Listen)
@@ -234,6 +239,10 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		"sessions":       s.hub.Snapshot(),
 		"handshake_ok":   s.hsOK.Load(),
 		"handshake_fail": s.hsFail.Load(),
+		"uptime_seconds": int64(time.Since(s.started).Seconds()),
+	}
+	if s.certs != nil {
+		out["cert_not_after"] = s.certs.expiry().UTC().Format(time.RFC3339)
 	}
 	if s.entry != nil {
 		out["streams_opened"] = s.entry.Streams.Load()
