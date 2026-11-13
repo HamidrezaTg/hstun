@@ -24,6 +24,17 @@ type Options struct {
 	TLS      *tls.Config
 	// UserAgent is sent on every request; empty means DefaultUserAgent.
 	UserAgent string
+
+	// Chunk selects the short-connection mode of the http carrier: every
+	// request uses its own TCP/TLS connection and carries at most ChunkUp
+	// bytes upstream and ChunkDown bytes downstream, with ChunkPar uploads and
+	// downloads in flight. It exists for paths that cut any connection after a
+	// few tens of kilobytes (Iran to Cloudflare customer hostnames, measured
+	// 2026-11-13). Zero values mean the package defaults.
+	Chunk     bool
+	ChunkUp   int
+	ChunkDown int
+	ChunkPar  int
 }
 
 // ClientTLS builds the client TLS config. Verification is never disabled:

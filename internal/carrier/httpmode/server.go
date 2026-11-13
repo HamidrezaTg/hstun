@@ -245,13 +245,23 @@ func (s *Server) down(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.touch()
 	sess.ackDown(ack)
-	deadline := time.NewTimer(hold)
+	// Chunk-mode clients ask for smaller responses (a path that cuts connections
+	// after a few tens of KB); anything else gets the full size.
+	max, holdFor, retx := downChunk, hold, rto
+	if v, ok := u64(r, hdrMax); ok && v >= minDownChunk && v < downChunk {
+		max, holdFor, retx = int(v), chunkHoldIdle, chunkRTO
+		sess.conn.setTxLimit(chunkTxLimit)
+		if sess.busy() {
+			holdFor = chunkHoldBusy
+		}
+	}
+	deadline := time.NewTimer(holdFor)
 	defer deadline.Stop()
 	for {
 		// Take the wake channel before looking for data, so a Write that lands
 		// in between is not missed.
 		wake := sess.waitDown()
-		frames, closed := sess.collectDown(downChunk)
+		frames, closed := sess.collectDown(max, retx)
 		if len(frames) > 0 {
 			var buf bytes.Buffer
 			for _, f := range frames {
@@ -274,7 +284,7 @@ func (s *Server) down(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-wake:
-		case <-time.After(rto): // re-check retransmit eligibility
+		case <-time.After(retx): // re-check retransmit eligibility
 		case <-deadline.C:
 			sess.touch()
 			w.WriteHeader(http.StatusNoContent)
@@ -341,6 +351,7 @@ type srvSession struct {
 	downSeq  uint64
 	unacked  []*dchunk
 	lastSeen time.Time
+	lastData time.Time // last time a data chunk moved in either direction
 }
 
 type dchunk struct {
@@ -354,6 +365,13 @@ func newSrvSession(sid, key []byte, ip string, onGone func(string)) *srvSession 
 	s := &srvSession{id: id, sid: sid, key: key, ip: ip, upNext: 1, upBuf: map[uint64][]byte{}, lastSeen: time.Now()}
 	s.conn = newSconn("hstun-http-server", ip, func() { onGone(id) })
 	return s
+}
+
+// busy reports whether payload moved recently (chunk mode shortens its hold then).
+func (s *srvSession) busy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Since(s.lastData) < chunkBusyFor
 }
 
 func (s *srvSession) touch() {
@@ -386,6 +404,7 @@ func (s *srvSession) acceptUp(seq uint64, data []byte) (ack uint64, accepted boo
 		return 0, false // reader is behind; push back
 	}
 	s.upBuf[seq] = data
+	s.lastData = time.Now()
 	for {
 		d, ok := s.upBuf[s.upNext]
 		if !ok {
@@ -417,7 +436,7 @@ func (s *srvSession) ackDown(ack uint64) {
 // collectDown returns chunks to send on this poll: unacked chunks older than
 // the retransmit timeout first, then new data. closed reports a dead session
 // with nothing left to send.
-func (s *srvSession) collectDown(max int) (out []*dchunk, closed bool) {
+func (s *srvSession) collectDown(max int, retx time.Duration) (out []*dchunk, closed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
@@ -426,7 +445,7 @@ func (s *srvSession) collectDown(max int) (out []*dchunk, closed bool) {
 		if budget <= 0 {
 			break
 		}
-		if c.sentAt.IsZero() || now.Sub(c.sentAt) >= rto {
+		if c.sentAt.IsZero() || now.Sub(c.sentAt) >= retx {
 			c.sentAt = now
 			out = append(out, c)
 			budget -= len(c.data)
@@ -445,6 +464,9 @@ func (s *srvSession) collectDown(max int) (out []*dchunk, closed bool) {
 	}
 	if len(out) == 0 && s.conn.isClosed() {
 		return nil, true
+	}
+	if len(out) > 0 {
+		s.lastData = now
 	}
 	return out, false
 }

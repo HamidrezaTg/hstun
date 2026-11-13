@@ -74,6 +74,8 @@ func New(cfg *config.ClientFile, logger *slog.Logger) (*Client, error) {
 		opts: carrier.Options{
 			Server: cfg.Client.Server, Connect: cfg.Client.Connect, SNI: sni,
 			WSPath: cfg.Client.WSPath, HTTPPath: cfg.Client.HTTPPath, TLS: tc, UserAgent: cfg.Client.UserAgent,
+			Chunk: cfg.Client.Carrier == "chunk", ChunkUp: cfg.Client.ChunkUpBytes,
+			ChunkDown: cfg.Client.ChunkDownBytes, ChunkPar: cfg.Client.ChunkParallel,
 		},
 	}
 	if cfg.Client.Role == config.RoleEntry {
@@ -184,7 +186,7 @@ func (c *Client) dialCarrier(ctx context.Context) (net.Conn, error) {
 	var conn net.Conn
 	var sk []byte
 	var err error
-	if c.cfg.Client.Carrier == "http" {
+	if c.cfg.Client.Carrier == "http" || c.cfg.Client.Carrier == "chunk" {
 		conn, sk, err = httpmode.Dial(dctx, c.opts, c.key, c.cfg.Client.Name)
 		if err != nil {
 			return nil, err
@@ -216,7 +218,11 @@ func (c *Client) session(ctx context.Context, slot int) error {
 		return err
 	}
 	defer conn.Close()
-	ms, err := mux.Dialer(conn, c.ping)
+	var mopts []mux.Option
+	if carrierID(c.cfg.Client.Carrier) == proto.CarrierHTTP {
+		mopts = append(mopts, mux.SlowCarrier())
+	}
+	ms, err := mux.Dialer(conn, c.ping, mopts...)
 	if err != nil {
 		return err
 	}
@@ -251,7 +257,7 @@ func (c *Client) session(ctx context.Context, slot int) error {
 }
 
 func carrierID(name string) byte {
-	if name == "http" {
+	if name == "http" || name == "chunk" {
 		return proto.CarrierHTTP
 	}
 	return proto.CarrierWS

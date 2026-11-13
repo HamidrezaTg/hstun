@@ -91,8 +91,12 @@ type ClientSection struct {
 	Server  string `toml:"server"`
 	Connect string `toml:"connect"`
 	SNI     string `toml:"sni"`
-	Carrier string `toml:"carrier"`
+	Carrier string `toml:"carrier"` // ws, http or chunk (the http carrier with one connection per request)
 	Conns   int    `toml:"conns"`
+	// chunk carrier only; 0 = default (12288 up, 32768 down, 8 parallel).
+	ChunkUpBytes   int `toml:"chunk_up_bytes"`   // largest upstream body per connection, 1024..65536
+	ChunkDownBytes int `toml:"chunk_down_bytes"` // largest downstream payload per connection, 4096..131072
+	ChunkParallel  int `toml:"chunk_parallel"`   // uploads and downloads in flight each, 1..32
 	// DialStagger spreads the first dials of a client's sessions: session 0
 	// connects at once, every other session waits a random time between a
 	// quarter of this value and the value itself. "0s" dials them all together.
@@ -160,8 +164,14 @@ func LoadServer(path string) (*ServerFile, error) {
 
 func (f *ServerFile) validate() error {
 	s := &f.Server
-	if s.Listen == "" || s.TLSCert == "" || s.TLSKey == "" {
-		return errors.New("server: listen, tls_cert and tls_key are required")
+	if s.Listen == "" {
+		return errors.New("server: listen is required")
+	}
+	if (s.TLSCert == "") != (s.TLSKey == "") {
+		return errors.New("server: tls_cert and tls_key must be set together")
+	}
+	if s.TLSCert == "" && s.TrustProxy != "loopback" {
+		return errors.New("server: tls_cert and tls_key are required; they may be left empty only with trust_proxy=loopback, which serves plain HTTP on a loopback address for a local proxy")
 	}
 	if len(s.SecretFiles) == 0 {
 		return errors.New("server: secret_files is required")
@@ -310,8 +320,17 @@ func (f *ClientFile) validate() error {
 			return fmt.Errorf("client: connect: %w", err)
 		}
 	}
-	if c.Carrier != "ws" && c.Carrier != "http" {
-		return fmt.Errorf("client: carrier must be ws or http, got %q", c.Carrier)
+	if c.Carrier != "ws" && c.Carrier != "http" && c.Carrier != "chunk" {
+		return fmt.Errorf("client: carrier must be ws, http or chunk, got %q", c.Carrier)
+	}
+	if c.ChunkUpBytes != 0 && (c.ChunkUpBytes < 1024 || c.ChunkUpBytes > 64<<10) {
+		return errors.New("client: chunk_up_bytes must be 0 (default) or 1024..65536")
+	}
+	if c.ChunkDownBytes != 0 && (c.ChunkDownBytes < 4096 || c.ChunkDownBytes > 128<<10) {
+		return errors.New("client: chunk_down_bytes must be 0 (default) or 4096..131072")
+	}
+	if c.ChunkParallel != 0 && (c.ChunkParallel < 1 || c.ChunkParallel > 32) {
+		return errors.New("client: chunk_parallel must be 0 (default) or 1..32")
 	}
 	if c.Conns < 1 || c.Conns > 64 {
 		return errors.New("client: conns must be 1..64")

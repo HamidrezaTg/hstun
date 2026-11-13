@@ -17,7 +17,7 @@ if [ -z "$have" ] || [ "$(printf '%s\n%s\n' "$have" "$MIN_GO" | sort -V | head -
   exit 1
 fi
 mkdir -p bin
-VERSION="${VERSION:-0.2.7}"
+VERSION="${VERSION:-0.2.9}"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o bin/hstun ./cmd/hstun
 sha256sum bin/hstun

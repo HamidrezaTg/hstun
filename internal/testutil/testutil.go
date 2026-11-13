@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"io"
 	"math/big"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -225,4 +226,80 @@ func pump(dst, src net.Conn, delay time.Duration, n *atomic.Int64) {
 	}
 	close(q)
 	<-done
+}
+
+// BudgetProxy is a TCP forwarder that imitates a path cutting every
+// connection after a byte budget per direction (Iran to a Cloudflare customer
+// name: about 20 KB upstream and 48 KB downstream). Once a direction exceeds
+// its budget, the rest of that connection is swallowed silently (the socket
+// stays open, nothing is forwarded). cuts counts the connections that hit a
+// budget.
+func BudgetProxy(t testing.TB, target string, upBudget, downBudget int) (addr string, cuts *atomic.Int64) {
+	t.Helper()
+	return FlakyBudgetProxy(t, target, upBudget, downBudget, 0, 0)
+}
+
+// FlakyBudgetProxy is BudgetProxy that also swallows `blackholePct` percent of
+// the connections from their first byte (a path that silently eats some
+// connections) and adds `delay` to every chunk in each direction (round trip
+// 2*delay).
+func FlakyBudgetProxy(t testing.TB, target string, upBudget, downBudget, blackholePct int, delay time.Duration) (addr string, cuts *atomic.Int64) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	cuts = &atomic.Int64{}
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				s, err := net.Dial("tcp", target)
+				if err != nil {
+					c.Close()
+					return
+				}
+				var cut atomic.Bool
+				hole := blackholePct > 0 && mrand.IntN(100) < blackholePct
+				budgeted := func(dst, src net.Conn, budget int) {
+					defer dst.Close()
+					defer src.Close()
+					buf := make([]byte, 16*1024)
+					sent := 0
+					for {
+						n, err := src.Read(buf)
+						if n > 0 {
+							if delay > 0 {
+								time.Sleep(delay)
+							}
+							if hole {
+								continue // swallow everything on this connection
+							}
+							if sent+n > budget {
+								if cut.CompareAndSwap(false, true) {
+									cuts.Add(1)
+								}
+								// swallow: keep draining so the sender never sees an error
+								continue
+							}
+							if _, werr := dst.Write(buf[:n]); werr != nil {
+								return
+							}
+							sent += n
+						}
+						if err != nil {
+							return
+						}
+					}
+				}
+				go budgeted(s, c, upBudget)
+				budgeted(c, s, downBudget)
+			}()
+		}
+	}()
+	return l.Addr().String(), cuts
 }

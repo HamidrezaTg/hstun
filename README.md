@@ -77,7 +77,7 @@ limits (`max_conns`, `max_conns_per_ip`, `auth_fail_per_min_per_ip`,
 or `[socks_exit]` depending on the role.
 
 Client (`deploy/client.example.toml`): `role`, `server`, optional `connect` (dial an IP
-while keeping the hostname for SNI/Host), `carrier`, `conns` (2 is enough; more connections did not measure faster), `dial_stagger`
+while keeping the hostname for SNI/Host), `carrier` (`ws`, `http` or `chunk`), `conns` (2 is enough; more connections did not measure faster), `dial_stagger`
 (spreads the first dials, default `2s`), `user_agent`, `tls_verify`
 (`system`, `ca_file` or `spki`; never off), `tls_mlkem` (default false; it worked to one host and broke the upgrade to another, so test each path before enabling), `[[forward]]`
 (`name` -> local `target`), `[socks_exit]` (`deny_private` refuses loopback,
@@ -230,11 +230,41 @@ scripts/build.sh           # static build and sha256
 half-dead connections against a live server while timing a legitimate request;
 `scripts/sec-probe.py` sends hostile input an unauthenticated client could send.
 
+## Chunk carrier: when a path cuts long connections
+
+Some paths let only small connections through. From Iran to any Cloudflare customer hostname (measured 2026-11-13 from a client host in Iran) a TLS
+connection survives about 20 KB upstream and 48 KB downstream; beyond that the rest is silently swallowed. That is independent of
+the IP and the port and is not fixed by ECH. `carrier = "chunk"` is the answer for such a path: it is the http carrier, but every
+request uses its own TCP/TLS connection and carries at most `chunk_up_bytes` (default 12288) up and `chunk_down_bytes` (default 32768)
+down, so no connection ever reaches the cut. `chunk_parallel` (default 8) uploads and downloads run at once. Server side nothing
+changes except that the `http` carrier must be enabled; the client announces its budget in a request header.
+
+What makes it work in practice (all found by measuring through Cloudflare from a client host in Iran):
+
+- Requests are short-lived and some are swallowed by the path, so timeouts are short (3 s per request) and an upstream chunk that
+  has not answered after 1 s is also sent on a second connection (the server deduplicates by sequence number). The server resends an
+  unacked downstream chunk after 1.5 s instead of 3 s.
+- A long-poll the client has abandoned can stay alive at the origin behind a CDN and swallow the next data, so the server answers
+  polls before the client gives up (hold 3 s while the session is busy, 10 s when idle, client timeout 15 s).
+- The carrier send buffer is limited to 192 KB in chunk mode (2 MB elsewhere); a bigger buffer queues seconds of upload in front of the
+  downstream's window updates and starves downloads. The mux write timeout is 45 s for http and chunk sessions.
+- Set `connect = "ip:443"` to an edge address that works from your side. From the test client host IPv6 was blackholed and 188.114.98.0 lost about 15%
+  of connections; 104.21.43.22 lost none.
+
+Measured from that client host to a Cloudflare-fronted exit abroad (real HTTPS through the exit's SOCKS support): exit IP correct, small page 0.9 s,
+5 MB download 8.8 s (about 4.6 Mbit/s), 2 MB upload 8.8 s, three parallel 5 MB downloads about 4.8 Mbit/s aggregate.
+Single stream download about 5 Mbit/s, upload 7-10 Mbit/s. More `chunk_parallel` did not help.
+
+Cost: many short TLS connections to the CDN (about 15-30 per second while busy) is a different and louder wire pattern than ws, and it is
+slow. It adds no protocol imitation: standard TLS and HTTP, one fixed SNI, no random URLs or headers. Use it only where ws cannot work.
+Tests: `internal/e2e` runs it through a proxy that cuts connections after 24 KB up and 48 KB down (the plain http carrier fails there),
+through a 5% connection-swallowing, delayed path with four concurrent streams, and `internal/testutil.BudgetProxy` is the harness.
+
 ## Behind nginx
 
 For a server that answers like an ordinary nginx site (nginx's TLS handshake, `Server: nginx`, nginx's own 404 and decoy
 pages), put nginx in front: `deploy/nginx-front.example.conf` and `deploy/server-behind-nginx.example.toml`. nginx owns the
 public port and the CA certificate, serves the decoy, and proxies only the two secret paths (WebSocket upgrades and POSTs) to
-hstun on `127.0.0.1`. hstun runs with `trust_proxy = "loopback"`: it believes `X-Real-IP` only from a loopback peer (the config
+hstun on `127.0.0.1`. hstun runs with `trust_proxy = "loopback"` and, in that mode, may leave `tls_cert`/`tls_key` empty to serve plain HTTP on loopback (a second TLS layer measurably slowed downloads on a small VPS; the relay buffers in the nginx example matter too): it believes `X-Real-IP` only from a loopback peer (the config
 refuses a non-loopback `listen` or an `allow_from` in this mode), so the auth-failure limiter still works per real client.
 Without hstun's own per-IP cap, add a kernel connection cap (see the comment in the nginx example). Units: `deploy/hstun-nginx.service`, and `hstun-nginx-reload.{path,service,timer}` to reload nginx when the renewed certificate appears (edit the `PathChanged=` line).

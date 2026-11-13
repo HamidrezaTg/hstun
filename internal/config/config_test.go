@@ -64,6 +64,48 @@ func TestTrustProxyLoopbackAccepted(t *testing.T) {
 	}
 }
 
+func TestPlainBackendOnlyBehindLoopbackProxy(t *testing.T) {
+	ok := "[server]\nlisten=\"127.0.0.1:1\"\nsecret_files=[\"s\"]\ntrust_proxy=\"loopback\"\n"
+	if _, err := LoadServer(write(t, ok)); err != nil {
+		t.Errorf("plain backend behind a loopback proxy rejected: %v", err)
+	}
+	for name, cfg := range map[string]string{
+		"no cert, no proxy":   "[server]\nlisten=\"127.0.0.1:1\"\nsecret_files=[\"s\"]\n",
+		"no cert, cloudflare": "[server]\nlisten=\"127.0.0.1:1\"\nsecret_files=[\"s\"]\ntrust_proxy=\"cloudflare\"\ncf_ranges_file=\"x\"\n",
+		"cert without key":    "[server]\nlisten=\"127.0.0.1:1\"\ntls_cert=\"a\"\nsecret_files=[\"s\"]\ntrust_proxy=\"loopback\"\n",
+		"key without cert":    "[server]\nlisten=\"127.0.0.1:1\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\ntrust_proxy=\"loopback\"\n",
+	} {
+		if _, err := LoadServer(write(t, cfg)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestChunkCarrierConfig(t *testing.T) {
+	base := "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\ncarrier=\"chunk\"\n"
+	if _, err := LoadClient(write(t, base+"chunk_up_bytes=12288\nchunk_down_bytes=32768\nchunk_parallel=8\n")); err != nil {
+		t.Errorf("valid chunk config rejected: %v", err)
+	}
+	if _, err := LoadClient(write(t, base)); err != nil {
+		t.Errorf("chunk with defaults rejected: %v", err)
+	}
+	for name, extra := range map[string]string{
+		"up too small":      "chunk_up_bytes=100\n",
+		"up too big":        "chunk_up_bytes=70000\n",
+		"down too small":    "chunk_down_bytes=100\n",
+		"down too big":      "chunk_down_bytes=200000\n",
+		"parallel too many": "chunk_parallel=99\n",
+		"parallel negative": "chunk_parallel=-1\n",
+	} {
+		if _, err := LoadClient(write(t, base+extra)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := LoadClient(write(t, "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\ncarrier=\"quic\"\n")); err == nil {
+		t.Error("unknown carrier accepted")
+	}
+}
+
 func TestClientValidation(t *testing.T) {
 	good := write(t, "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\n")
 	if _, err := LoadClient(good); err != nil {

@@ -10,3 +10,4 @@ Go module `hstun`.
 - Keep it plain: real TLS and ordinary HTTP/WebSocket framing only. No protocol imitation, no browser TLS-fingerprint copying, fake URL rotation or DPI tricks. Making the server look like an ordinary website (decoy, ALPN, resumption) is in scope; see README "Looking like ordinary HTTPS".
 - Every new read/write/handshake needs a deadline and a length cap; add a wedge-style test for anything that accepts input from the network.
 - Release checklist: bump `DefaultUserAgent` in `internal/carrier/tlsconf.go` to the current stable Chrome major (the string is frozen apart from the major), run `scripts/test.sh`.
+- The `chunk` carrier (one connection per request, each under a byte budget) is an explicit, operator-requested option for paths that cut long connections. It stays plain: standard TLS and HTTP, one fixed SNI, no random URLs, hosts, headers or SNI rotation. Do not extend it into protocol imitation.
