@@ -21,6 +21,10 @@ Also check that your proxy clients connect to the entry's forward port (default 
 
 A log line from the entry when the exit is addressed by IP. With a pinned self-signed certificate (the `direct` default) it is normal and logged as information. If connections are reset right after connecting and the certificate is a normal one, set `--sni some.hostname` (or `sni` in `client.toml`).
 
+## Some clients connect, others do not (IPv6)
+
+If the domain has an AAAA record, clients that prefer IPv6 go there. The exit must listen on IPv6 (`[::]`) and its firewall must allow it. `hstun-ctl doctor` says when there is an AAAA record and the exit does not listen on IPv6; fix it with `hstun-ctl edit --ipv6` (or remove the AAAA record).
+
 ## "port N is already in use"
 
 Pick another public port with `--port`, or stop the service that holds it (`ss -ltnp`). nginx mode and direct mode default to 443 and fall back to 2083 when 443 is taken.

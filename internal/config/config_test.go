@@ -296,3 +296,27 @@ func TestDecoyDirValidated(t *testing.T) {
 		t.Fatalf("missing decoy_dir accepted: %v", err)
 	}
 }
+
+func TestAutoCarrierConfig(t *testing.T) {
+	base := "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\n"
+	for name, body := range map[string]string{
+		"auto":                "carrier=\"auto\"\n",
+		"auto with order":     "carrier=\"auto\"\nauto_order=[\"ws\",\"chunk\"]\n",
+		"auto, reverse order": "carrier=\"auto\"\nauto_order=[\"chunk\",\"http\",\"ws\"]\n",
+	} {
+		if _, err := LoadClient(write(t, base+body)); err != nil {
+			t.Errorf("%s rejected: %v", name, err)
+		}
+	}
+	for name, body := range map[string]string{
+		"order without auto":  "carrier=\"ws\"\nauto_order=[\"ws\",\"http\"]\n",
+		"one carrier":         "carrier=\"auto\"\nauto_order=[\"ws\"]\n",
+		"unknown carrier":     "carrier=\"auto\"\nauto_order=[\"ws\",\"quic\"]\n",
+		"duplicate":           "carrier=\"auto\"\nauto_order=[\"ws\",\"ws\"]\n",
+		"unknown carrier set": "carrier=\"fast\"\n",
+	} {
+		if _, err := LoadClient(write(t, base+body)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

@@ -14,7 +14,7 @@ protocols or try to beat DPI with tricks.
 - **Exit**: the host outside the restricted network. It receives the tunnel and passes the traffic to your proxy.
 - **Entry**: the host inside. Your users (or your proxy clients) connect to it.
 
-Version 0.3.1. Pre-release, not independently audited. Details: [docs/security.md](docs/security.md).
+Version 0.4.0. Pre-release, not independently audited. Details: [docs/security.md](docs/security.md).
 
 ## Quick start
 
@@ -40,7 +40,7 @@ WebSocket (`ws`) is the default carrier and is chosen for you; see below if you 
 | You already use a Cloudflare Tunnel | `cloudflared` | `chunk` if long connections to Cloudflare are cut on your path, else `ws` |
 | WebSocket is blocked on the path | any | `http` |
 
-More: [docs/modes-and-carriers.md](docs/modes-and-carriers.md). Change the carrier on the entry with `--carrier ws|http|chunk`.
+More: [docs/modes-and-carriers.md](docs/modes-and-carriers.md). Change the carrier on the entry with `--carrier ws|http|chunk`, or use `--carrier auto` to let it fail over by itself.
 
 ## Daily use
 
@@ -53,6 +53,7 @@ More: [docs/modes-and-carriers.md](docs/modes-and-carriers.md). Change the carri
 | `hstun-ctl update` / `rollback` | latest release (rolls back by itself if it fails) / previous binary |
 | `hstun-ctl show-join` | the pair code again (`--no-secret` for the version without the secret) |
 | `hstun-ctl backup` / `restore FILE [--test]` | one private archive of every instance / check and restore it |
+| `hstun-ctl rotate-secret` / `pin VERSION` | new secret without downtime / keep every host on one release |
 | `hstun-ctl uninstall [--purge]` | remove an instance |
 
 Everything has flags too, so it runs unattended (`--yes`): [docs/install.md](docs/install.md). Re-running the installer on an installed host asks

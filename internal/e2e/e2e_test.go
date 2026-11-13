@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -433,5 +434,69 @@ func TestChunkCarrierFlakyPath(t *testing.T) {
 		if err := <-errc; err != nil {
 			t.Fatalf("stream %d of 4 concurrent 1 MB transfers over a flaky path: %v", i, err)
 		}
+	}
+}
+
+// carrier = "auto": the server only offers the http carrier, so the WebSocket
+// attempts fail, the client moves to http by itself and carries traffic.
+func TestAutoCarrierFailsOverFromWebSocketToHTTP(t *testing.T) {
+	// restore the timing only after the client goroutines have stopped (cleanups run last-in first-out)
+	t.Cleanup(client.SetAutoTiming(2, time.Hour))
+	e := startServer(t, []string{"http"})
+	e.startClient(t, "auto", 1, e.tunnel, e.certPath)
+	waitFor(t, 20*time.Second, func() bool { return e.srv.Sessions() >= 1 })
+	if err := roundTrip(e.fwd, 256<<10); err != nil {
+		t.Fatalf("traffic over the failed-over carrier: %v", err)
+	}
+}
+
+// With every carrier offered, auto stays on the first choice (ws).
+func TestAutoCarrierPrefersWebSocket(t *testing.T) {
+	e := startServer(t, []string{"ws", "http"})
+	e.startClient(t, "auto", 1, e.tunnel, e.certPath)
+	if err := roundTrip(e.fwd, 128<<10); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range e.srv.SessionList() {
+		if s.Carrier != "ws" {
+			t.Fatalf("auto should start on ws, session uses carrier %s", s.Carrier)
+		}
+	}
+}
+
+// The whole tunnel over IPv6: the server listens on [::1] and the client dials an IPv6 literal.
+func TestTunnelOverIPv6(t *testing.T) {
+	if l, err := net.Listen("tcp", "[::1]:0"); err != nil {
+		t.Skip("no IPv6 loopback on this machine")
+	} else {
+		_ = l.Close()
+	}
+	e := startServerOpt(t, []string{"ws", "http"}, func(c *config.ServerFile) { c.Server.Listen = "[::1]:0" })
+	for _, carrierName := range []string{"ws", "http"} {
+		cancel := e.startClient(t, carrierName, 1, e.tunnel, e.certPath)
+		if err := roundTrip(e.fwd, 128<<10); err != nil {
+			t.Fatalf("%s over IPv6: %v", carrierName, err)
+		}
+		cancel()
+		waitFor(t, 10*time.Second, func() bool { return e.srv.Sessions() == 0 })
+	}
+}
+
+// A dual-stack listener serves IPv4 and IPv6 clients on the same port.
+func TestDualStackListener(t *testing.T) {
+	probe, err := net.Listen("tcp", "[::]:0")
+	if err != nil {
+		t.Skip("no dual-stack listener on this machine")
+	}
+	_ = probe.Close()
+	e := startServerOpt(t, []string{"ws"}, func(c *config.ServerFile) { c.Server.Listen = "[::]:0" })
+	port := e.srv.Addr().(*net.TCPAddr).Port
+	for _, host := range []string{"127.0.0.1", "::1"} {
+		cancel := e.startClient(t, "ws", 1, net.JoinHostPort(host, strconv.Itoa(port)), e.certPath)
+		if err := roundTrip(e.fwd, 64<<10); err != nil {
+			t.Fatalf("client via %s: %v", host, err)
+		}
+		cancel()
+		waitFor(t, 10*time.Second, func() bool { return e.srv.Sessions() == 0 })
 	}
 }

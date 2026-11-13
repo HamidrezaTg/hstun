@@ -39,6 +39,8 @@ type Client struct {
 	// stagger is the longest random delay before a non-first session's first dial.
 	stagger time.Duration
 
+	pick *picker
+
 	hub   *entry.Hub   // role entry
 	entry *entry.Entry // role entry
 	exit  *exit.Exit   // role exit
@@ -78,10 +80,18 @@ func New(cfg *config.ClientFile, logger *slog.Logger) (*Client, error) {
 		opts: carrier.Options{
 			Server: cfg.Client.Server, Connect: cfg.Client.Connect, SNI: sni,
 			WSPath: cfg.Client.WSPath, HTTPPath: cfg.Client.HTTPPath, TLS: tc, UserAgent: cfg.Client.UserAgent,
-			Chunk: cfg.Client.Carrier == "chunk", ChunkUp: cfg.Client.ChunkUpBytes,
+			ChunkUp:   cfg.Client.ChunkUpBytes,
 			ChunkDown: cfg.Client.ChunkDownBytes, ChunkPar: cfg.Client.ChunkParallel,
 		},
 	}
+	order := []string{cfg.Client.Carrier}
+	if cfg.Client.Carrier == "auto" {
+		order = defaultAutoOrder
+		if len(cfg.Client.AutoOrder) > 0 {
+			order = cfg.Client.AutoOrder
+		}
+	}
+	c.pick = newPicker(order, logger)
 	if cfg.Client.Role == config.RoleEntry {
 		c.hub = entry.NewHub(0, cfg.Client.MaxStreamsPerSession)
 		c.entry = entry.New(c.hub, logger, idle, cfg.Forward, cfg.Socks, cfg.Client.ForwardMaxConnsPerIP)
@@ -120,6 +130,9 @@ func (c *Client) Run(ctx context.Context) {
 			go c.serveAdmin(ctx, a)
 		}
 	}
+	if c.pick.auto() {
+		go c.probeLoop(ctx)
+	}
 	done := make(chan struct{}, c.cfg.Client.Conns)
 	for i := 0; i < c.cfg.Client.Conns; i++ {
 		go func(i int) {
@@ -144,9 +157,15 @@ func (c *Client) slot(ctx context.Context, i int) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		start := time.Now()
-		err := c.session(ctx, i)
+		name, _ := c.pick.current()
+		up, err := c.session(ctx, i)
 		if ctx.Err() != nil {
 			return
+		}
+		if c.pick.auto() {
+			if c.pick.report(name, up) {
+				backoff = time.Second // fresh start on the new carrier
+			}
 		}
 		if time.Since(start) > time.Minute {
 			backoff = time.Second // it was healthy for a while
@@ -184,19 +203,21 @@ func errString(err error) string {
 
 // dialCarrier opens one carrier session, runs the handshake and seals the
 // stream with the session key.
-func (c *Client) dialCarrier(ctx context.Context) (net.Conn, error) {
+func (c *Client) dialCarrier(ctx context.Context, name string) (net.Conn, error) {
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	var conn net.Conn
 	var sk []byte
 	var err error
-	if c.cfg.Client.Carrier == "http" || c.cfg.Client.Carrier == "chunk" {
-		conn, sk, err = httpmode.Dial(dctx, c.opts, c.key, c.cfg.Client.Name)
+	opts := c.opts
+	opts.Chunk = name == "chunk"
+	if name == "http" || name == "chunk" {
+		conn, sk, err = httpmode.Dial(dctx, opts, c.key, c.cfg.Client.Name)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		if conn, err = ws.Dial(dctx, c.opts); err != nil {
+		if conn, err = ws.Dial(dctx, opts); err != nil {
 			return nil, err
 		}
 		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
@@ -216,47 +237,77 @@ func (c *Client) dialCarrier(ctx context.Context) (net.Conn, error) {
 	return sealed, nil
 }
 
-func (c *Client) session(ctx context.Context, slot int) error {
-	conn, err := c.dialCarrier(ctx)
+// session runs one carrier session on the carrier the picker names. up is
+// true when the session got established (so the attempt counts as a success).
+func (c *Client) session(ctx context.Context, slot int) (up bool, err error) {
+	name, changed := c.pick.current()
+	conn, err := c.dialCarrier(ctx, name)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer conn.Close()
 	var mopts []mux.Option
-	if carrierID(c.cfg.Client.Carrier) == proto.CarrierHTTP {
+	if carrierID(name) == proto.CarrierHTTP {
 		mopts = append(mopts, mux.SlowCarrier())
 	}
 	ms, err := mux.Dialer(conn, c.ping, mopts...)
 	if err != nil {
-		return err
+		return false, err
 	}
 	role := c.cfg.Client.Role
-	c.log.Info("session up", "slot", slot, "carrier", c.cfg.Client.Carrier, "role", role)
+	c.log.Info("session up", "slot", slot, "carrier", name, "role", role)
 	go func() {
 		select {
 		case <-ctx.Done():
+			_ = ms.Close()
+		case <-changed: // a better (or another) carrier was chosen: end this session so the slot redials on it
 			_ = ms.Close()
 		case <-ms.CloseChan():
 		}
 	}()
 	if c.exit != nil {
-		return c.exit.Serve(ctx, ms)
+		return true, c.exit.Serve(ctx, ms)
 	}
 	sess := &entry.Session{
-		Name: c.cfg.Client.Name, Carrier: carrierID(c.cfg.Client.Carrier),
+		Name: c.cfg.Client.Name, Carrier: carrierID(name),
 		IP: c.cfg.Client.Server, Since: time.Now(), Mux: ms,
 	}
 	if err := c.hub.Add(sess); err != nil {
-		return err
+		return true, err
 	}
 	defer c.hub.Remove(sess)
 	// An entry never serves streams; refuse any the server opens.
 	for {
 		st, err := ms.AcceptStream()
 		if err != nil {
-			return err
+			return true, err
 		}
 		_ = st.Close()
+	}
+}
+
+// probeLoop, while the client sits on a carrier that is not the first choice,
+// tries the better ones now and then (a full handshake, then closes) and moves
+// back as soon as one works.
+func (c *Client) probeLoop(ctx context.Context) {
+	t := time.NewTicker(autoProbeEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		for _, name := range c.pick.better() {
+			conn, err := c.dialCarrier(ctx, name)
+			if err != nil {
+				c.log.Debug("probe failed", "carrier", name, "err", err)
+				continue
+			}
+			_ = conn.Close()
+			c.pick.promote(name)
+			break
+		}
 	}
 }
 
@@ -281,6 +332,8 @@ func (c *Client) serveAdmin(ctx context.Context, addr string) {
 			"sessions":       c.hub.Snapshot(),
 			"streams_opened": c.entry.Streams.Load(),
 			"stream_errors":  c.entry.StreamErr.Load(),
+			"carrier_mode":   c.cfg.Client.Carrier,
+			"carrier":        currentName(c.pick),
 		})
 	})
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second}
@@ -290,3 +343,5 @@ func (c *Client) serveAdmin(ctx context.Context, addr string) {
 
 // OpenForTest opens a forward stream by name (entry role); for loopback tests.
 func (c *Client) OpenForTest(name string) (net.Conn, byte, error) { return c.entry.OpenForTest(name) }
+
+func currentName(p *picker) string { n, _ := p.current(); return n }

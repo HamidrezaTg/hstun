@@ -5,7 +5,7 @@ role        = "exit"                     # exit (default) | entry
 server      = "hs.example.org:443"       # hostname behind Cloudflare (or host:port direct)
 connect     = ""                         # optional ip:port to dial instead (direct test: "198.51.100.20:23456")
 sni         = ""                         # defaults to the host of `server`
-carrier     = "ws"                       # ws | http | chunk  (the profile switch)
+carrier     = "ws"                       # ws | http | chunk | auto  (the profile switch)
 conns       = 2                          # 2 measured as fast as 4 on a real path and looks less uniform
 dial_stagger = "2s"                      # first dial of sessions 1.. waits a random 0.5-2 s; "0s" = all at once
 secret_file = "/etc/hstun/secret"        # the same secret as the server

@@ -91,8 +91,10 @@ type ClientSection struct {
 	Server  string `toml:"server"`
 	Connect string `toml:"connect"`
 	SNI     string `toml:"sni"`
-	Carrier string `toml:"carrier"` // ws, http or chunk (the http carrier with one connection per request)
-	Conns   int    `toml:"conns"`
+	Carrier string `toml:"carrier"` // ws, http, chunk (the http carrier with one connection per request) or auto (fail over ws, http, chunk)
+	// AutoOrder is the order tried by carrier = "auto" (default ws, http, chunk).
+	AutoOrder []string `toml:"auto_order"`
+	Conns     int      `toml:"conns"`
 	// chunk carrier only; 0 = default (12288 up, 32768 down, 8 parallel).
 	ChunkUpBytes   int `toml:"chunk_up_bytes"`   // largest upstream body per connection, 1024..65536
 	ChunkDownBytes int `toml:"chunk_down_bytes"` // largest downstream payload per connection, 4096..131072
@@ -321,8 +323,24 @@ func (f *ClientFile) validate() error {
 			return fmt.Errorf("client: connect: %w", err)
 		}
 	}
-	if c.Carrier != "ws" && c.Carrier != "http" && c.Carrier != "chunk" {
-		return fmt.Errorf("client: carrier must be ws, http or chunk, got %q", c.Carrier)
+	if c.Carrier != "ws" && c.Carrier != "http" && c.Carrier != "chunk" && c.Carrier != "auto" {
+		return fmt.Errorf("client: carrier must be ws, http, chunk or auto, got %q", c.Carrier)
+	}
+	if len(c.AutoOrder) > 0 && c.Carrier != "auto" {
+		return errors.New("client: auto_order only applies with carrier = \"auto\"")
+	}
+	seen := map[string]bool{}
+	for _, a := range c.AutoOrder {
+		if a != "ws" && a != "http" && a != "chunk" {
+			return fmt.Errorf("client: auto_order has unknown carrier %q", a)
+		}
+		if seen[a] {
+			return fmt.Errorf("client: auto_order lists %q twice", a)
+		}
+		seen[a] = true
+	}
+	if c.Carrier == "auto" && len(c.AutoOrder) == 1 {
+		return errors.New("client: auto_order needs at least two carriers (use a single carrier instead)")
 	}
 	if c.ChunkUpBytes != 0 && (c.ChunkUpBytes < 1024 || c.ChunkUpBytes > 64<<10) {
 		return errors.New("client: chunk_up_bytes must be 0 (default) or 1024..65536")

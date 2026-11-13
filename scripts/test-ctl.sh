@@ -34,11 +34,11 @@ PY
 python3 "$T/echo.py" & echo_pid=$!; pids+=("$echo_pid")
 
 ./install.sh exit --yes --mode direct --forward-target "127.0.0.1:$((base + 1))" --port "$base" --backend-port "$((base + 5))" >"$T/exit.log" 2>&1 || { cat "$T/exit.log"; fail "exit install"; }
-"$T/bin/hstun" server -config "$T/etc/hstun/server.toml" >"$T/server.log" 2>&1 & pids+=($!)
+"$T/bin/hstun" server -config "$T/etc/hstun/server.toml" >"$T/server.log" 2>&1 & spid=$!; pids+=("$spid")
 sleep 1
 J=$("$T/bin/hstun-ctl" show-join 2>/dev/null)
 ./install.sh entry --yes --name e1 --join "$J" --forward-listen "127.0.0.1:$((base + 2))" >"$T/entry.log" 2>&1 || { cat "$T/entry.log"; fail "entry install"; }
-"$T/bin/hstun" client -config "$T/etc/hstun-e1/client.toml" >"$T/client.log" 2>&1 & pids+=($!)
+"$T/bin/hstun" client -config "$T/etc/hstun-e1/client.toml" >"$T/client.log" 2>&1 & cpid=$!; pids+=("$cpid")
 admin=$(sed -n 's/^admin_listen = "\(.*\)"/\1/p' "$T/etc/hstun-e1/client.toml")
 for _ in $(seq 1 20); do curl -s -m 2 "http://$admin/stats" 2>/dev/null | grep -q '"carrier"' && break; sleep 0.5; done
 ok "exit and entry running"
@@ -95,4 +95,38 @@ ok "update rolls back automatically when the tunnel does not come back"
 "$T/bin/hstun-ctl" rollback --yes >/dev/null 2>&1 || fail "rollback"
 [ "$(sum "$T/bin/hstun")" = "$old" ] || fail "rollback did not restore the previous binary"
 ok "update keeps the previous binary and rollback restores it"
+# --- rotate-secret: exit adds a second secret, the entry follows, the exit finishes ---
+sessions() { curl -s -m 2 "http://$admin/stats" 2>/dev/null | grep -o '"carrier"' | wc -l; }
+restart_server() { kill "$spid" 2>/dev/null || true; sleep 0.5; "$T/bin/hstun" server -config "$T/etc/hstun/server.toml" >>"$T/server.log" 2>&1 & spid=$!; pids+=("$spid"); sleep 1; }
+restart_client() { kill "$cpid" 2>/dev/null || true; sleep 0.5; "$T/bin/hstun" client -config "$T/etc/hstun-e1/client.toml" >>"$T/client.log" 2>&1 & cpid=$!; pids+=("$cpid"); for _ in $(seq 1 20); do [ "$(sessions)" -ge 1 ] && return 0; sleep 0.5; done; return 1; }
+"$T/bin/hstun-ctl" edit --yes --port "$base" >/dev/null 2>&1 || fail "edit back to the original port"
+old_secret=$(sum "$T/etc/hstun/secret")
+"$T/bin/hstun-ctl" rotate-secret >"$T/rot.log" 2>&1 || { cat "$T/rot.log"; fail "rotate-secret start"; }
+grep -q 'secret_files = \[.*secret", ".*secret.new"\]' "$T/etc/hstun/server.toml" || fail "server does not list both secrets"
+code=$(grep -o "rotate-secret --join '[^']*'" "$T/rot.log" | head -1 | sed "s/.*--join '//; s/'$//")
+[ -n "$code" ] || fail "no pair code printed for the rotation"
+restart_server
+restart_client || fail "the entry with the OLD secret must still connect while both are accepted"
+ok "rotation started: the exit accepts the old and the new secret"
+"$T/bin/hstun-ctl" --name e1 rotate-secret --join "$code" >"$T/rot2.log" 2>&1 || { cat "$T/rot2.log"; fail "entry rotate-secret"; }
+[ "$(sum "$T/etc/hstun-e1/secret")" != "$old_secret" ] || fail "the entry still has the old secret"
+restart_client || fail "the entry with the NEW secret does not connect"
+ok "the entry switched to the new secret"
+"$T/bin/hstun-ctl" rotate-secret --finish --yes >"$T/rot3.log" 2>&1 || { cat "$T/rot3.log"; fail "rotate-secret --finish"; }
+[ "$(sum "$T/etc/hstun/secret")" = "$(sum "$T/etc/hstun-e1/secret")" ] && [ ! -e "$T/etc/hstun/secret.new" ] || fail "finish did not install the new secret"
+grep -q 'secret_files = \["[^"]*/secret"\]' "$T/etc/hstun/server.toml" || fail "finish left two secrets in the config"
+restart_server; sleep 3
+[ "$(sessions)" -ge 1 ] || fail "the entry lost its session after finish"
+ok "rotation finished: one secret, tunnel up"
+if "$T/bin/hstun-ctl" rotate-secret --finish --yes >/dev/null 2>&1; then fail "finish without a rotation succeeded"; fi
+ok "finish without a started rotation is refused"
+
+# --- pin ---
+"$T/bin/hstun-ctl" pin 0.3.1 >/dev/null 2>&1 || fail "pin"
+[ "$(cat "$T/etc/hstun.pin")" = "0.3.1" ] || fail "pin file"
+"$T/bin/hstun-ctl" pin 2>&1 | grep -q "pinned to 0.3.1" || fail "pin does not show the version"
+if "$T/bin/hstun-ctl" pin not-a-version >/dev/null 2>&1; then fail "pin accepted a bad version"; fi
+"$T/bin/hstun-ctl" pin --clear >/dev/null 2>&1; [ ! -e "$T/etc/hstun.pin" ] || fail "pin --clear"
+ok "pin, show and clear work, bad versions are refused"
+
 echo "test-ctl: all passed"

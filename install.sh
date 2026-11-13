@@ -15,7 +15,7 @@
 # so it runs unattended with --yes. See README.md ("Install").
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.3.1"
+INSTALLER_VERSION="0.4.0"
 REPO="${HSTUN_REPO:-HamidrezaTg/hstun}"
 WANT_VERSION="${HSTUN_VERSION:-}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
@@ -209,7 +209,7 @@ NAME=""
 ROLE="" MODE="" FORWARD_TARGET="" PORT="" DOMAIN="" CERT="" KEY="" ACME="" EMAIL="" ALLOW_FROM="" DECOY_DIR="" BACKEND_PORT=""
 JOIN="" JOIN_SECRET="" NO_SECRET=0 SERVER="" CARRIER="" WS_PATH="" HTTP_PATH="" SECRET_FILE="" SECRET_FROM="" TLS_VERIFY="" SPKI="" CONNECT="" SNI=""
 FORWARD_LISTEN="" FORWARD_NAME="" CONNS="" CHUNK_PARALLEL="" SOCKS_LISTEN="" NO_FW="" ADMIN_PORT="" SELF_SIGNED="" PUBLIC_ADDR=""
-FOLLOW=0 PURGE=0 ALL=0 EDIT_MODE=0 FILE="" FILE_TEST=0 FORCE=0 RECONFIGURE=0 REINSTALL=0 NEW_CERT=0 CUSTOMIZE=0 SKIP_LOAD="" DRY_RUN=0 ADOPT_ONLY=""
+FOLLOW=0 PURGE=0 ALL=0 IPV6="" FINISH=0 SECRET_OVERRIDE="" EDIT_MODE=0 FILE="" FILE_TEST=0 FORCE=0 RECONFIGURE=0 REINSTALL=0 NEW_CERT=0 CUSTOMIZE=0 SKIP_LOAD="" DRY_RUN=0 ADOPT_ONLY=""
 ADOPTED="" ADOPT_UNITS="" ADOPT_BIN=""
 
 set_paths() {
@@ -219,7 +219,7 @@ set_paths() {
 }
 CONF_KEYS=(ROLE MODE FORWARD_TARGET PORT DOMAIN CERT KEY BACKEND_PORT ADMIN_PORT WS_PATH HTTP_PATH SERVER CARRIER TLS_VERIFY SPKI CONNECT SNI
   FORWARD_LISTEN FORWARD_NAME CONNS CHUNK_PARALLEL SOCKS_LISTEN ALLOW_FROM PUBLIC_ADDR FW_PORTS CONNLIMIT_PORT SELF_SIGNED
-  ADOPTED ADOPT_UNITS ADOPT_BIN)
+  ADOPTED ADOPT_UNITS ADOPT_BIN IPV6)
 FW_PORTS="" CONNLIMIT_PORT=""
 load_conf() { # saved values only fill what is still empty (flags win)
   [ -f "$ETC/install.conf" ] || return 0
@@ -312,34 +312,44 @@ fw_allow() { # port [from]
   FW_PORTS="$FW_PORTS $1"
   info "ufw: allowed $1/tcp${2:+ from $2}"
 }
+connlimit_edit() { # FILE CHAIN MASK PORT: add the per-source cap after the loopback accept line (idempotent)
+  local f=$1 chain=$2 mask=$3 port=$4
+  [ -f "$f" ] || return 1
+  grep -q "hstun-connlimit $UNIT begin" "$f" && return 0
+  cp -p "$f" "$f.pre-$UNIT"
+  awk -v u="$UNIT" -v p="$port" -v ch="$chain" -v m="$mask" '{print} $0 ~ ("^-A " ch " -i lo -j ACCEPT") && !d {
+    print "# hstun-connlimit " u " begin"
+    print "-A " ch " -p tcp --dport " p " --syn -m connlimit --connlimit-above 64 --connlimit-mask " m " -j REJECT --reject-with tcp-reset"
+    print "# hstun-connlimit " u " end"; d=1 }' "$f" >"$f.new" && mv "$f.new" "$f"
+}
 fw_connlimit() { # port: at most 64 concurrent connections per source IP (nginx limit_conn does not count silent connections)
   [ "$TEST" = 1 ] && return 0
   [ -n "$NO_FW" ] && return 0
   if ufw_active && [ -f /etc/ufw/before.rules ]; then
-    if ! grep -q "hstun-connlimit $UNIT begin" /etc/ufw/before.rules; then
-      cp -p /etc/ufw/before.rules "/etc/ufw/before.rules.pre-$UNIT"
-      awk -v u="$UNIT" -v p="$1" '{print} /^-A ufw-before-input -i lo -j ACCEPT/ && !d {
-        print "# hstun-connlimit " u " begin"
-        print "-A ufw-before-input -p tcp --dport " p " --syn -m connlimit --connlimit-above 64 --connlimit-mask 32 -j REJECT --reject-with tcp-reset"
-        print "# hstun-connlimit " u " end"; d=1 }' /etc/ufw/before.rules >/etc/ufw/before.rules.new && mv /etc/ufw/before.rules.new /etc/ufw/before.rules
-      ufw reload >/dev/null
-      # shellcheck disable=SC2034  # saved to install.conf through CONF_KEYS
-      CONNLIMIT_PORT=$1
-      info "ufw: per-source cap of 64 concurrent connections on $1/tcp"
+    connlimit_edit /etc/ufw/before.rules ufw-before-input 32 "$1"
+    # IPv6: per /64, only when ufw manages IPv6 and this exit listens on it
+    if [ "$IPV6" = 1 ] && [ -f /etc/ufw/before6.rules ] && grep -qi '^IPV6=yes' /etc/default/ufw 2>/dev/null; then
+      connlimit_edit /etc/ufw/before6.rules ufw6-before-input 64 "$1" || true
     fi
+    ufw reload >/dev/null
+    # shellcheck disable=SC2034  # saved to install.conf through CONF_KEYS
+    CONNLIMIT_PORT=$1
+    info "ufw: per-source cap of 64 concurrent connections on $1/tcp"
   else
     warn "ufw is not active: add a per-source connection cap on $1/tcp yourself (iptables -m connlimit --connlimit-above 64)"
   fi
 }
 fw_remove() {
   [ "$TEST" = 1 ] && return 0
-  local p
+  local p f
   if ufw_active; then
     for p in $FW_PORTS; do ufw --force delete allow "$p/tcp" >/dev/null 2>&1 || true; done
-    if grep -q "hstun-connlimit $UNIT begin" /etc/ufw/before.rules 2>/dev/null; then
-      sed -i "/# hstun-connlimit $UNIT begin/,/# hstun-connlimit $UNIT end/d" /etc/ufw/before.rules
-      ufw reload >/dev/null
-    fi
+    for f in /etc/ufw/before.rules /etc/ufw/before6.rules; do
+      if grep -q "hstun-connlimit $UNIT begin" "$f" 2>/dev/null; then
+        sed -i "/# hstun-connlimit $UNIT begin/,/# hstun-connlimit $UNIT end/d" "$f"
+        ufw reload >/dev/null
+      fi
+    done
   fi
 }
 
@@ -493,7 +503,7 @@ http {
 
     server {
         listen 0.0.0.0:$PORT ssl http2;
-        listen [::]:$PORT ssl http2;
+$([ "$IPV6" = 1 ] && echo "        listen [::]:$PORT ssl http2;")
         server_name $DOMAIN;
         ssl_certificate     $CERT;
         ssl_certificate_key $KEY;
@@ -553,7 +563,7 @@ render_server_toml() {
     nginx) listen="127.0.0.1:$BACKEND_PORT"; trust='trust_proxy  = "loopback"' ;;
     cloudflared) listen="127.0.0.1:$BACKEND_PORT"; trust='trust_proxy  = "cloudflared"' ;;
     direct)
-      listen="0.0.0.0:$PORT"
+      if [ "$IPV6" = 1 ]; then listen="[::]:$PORT"; else listen="0.0.0.0:$PORT"; fi # [::] is dual-stack (bindv6only=0 is checked)
       tls="tls_cert     = \"$ETC/cert.pem\"
 tls_key      = \"$ETC/key.pem\""
       if [ -n "$ALLOW_FROM" ]; then
@@ -660,18 +670,34 @@ make_secret() {
 detect_addr() {
   local a
   a=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+  [ -n "$a" ] || a=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | sed -n 's/.* src \([0-9a-f:]*\).*/\1/p' | head -1)
   echo "${a:-YOUR.SERVER.IP}"
+}
+# the host part of host:port with brackets for an IPv6 literal
+bracket() { case "$1" in \[*) echo "$1" ;; *:*) echo "[$1]" ;; *) echo "$1" ;; esac; }
+unbracket() { local h=$1; h=${h#[}; echo "${h%]}"; }
+# true when this host can serve IPv6 on a dual-stack socket: IPv6 enabled, a global address, bindv6only=0
+ipv6_ok() {
+  [ -d /proc/sys/net/ipv6 ] || return 1
+  [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" = 0 ] || return 1
+  [ "$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null || echo 0)" = 0 ] || return 1
+  ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 '
+}
+want_ipv6() { # sets IPV6 to 1 or 0 once (flag, saved value, or detection)
+  [ -n "$IPV6" ] && return 0
+  if [ "$TEST" = 1 ]; then IPV6=0; elif ipv6_ok; then IPV6=1; else IPV6=0; fi
 }
 make_join() { # [secret]: prints the join string (everything the entry needs, secret only when asked) or, with "secret", the pair code
   local host=${DOMAIN:-${PUBLIC_ADDR:-$(detect_addr)}} srv port=$PORT tls=system spki="" car=${CARRIER:-ws}
   [ "$MODE" = cloudflared ] && { port=443; car=chunk; }
-  srv="$host:$port"
+  srv="$(bracket "$host"):$port"
   if [ "$MODE" = direct ] && [ -z "$DOMAIN" ] || { [ "$MODE" = direct ] && [ -n "$SELF_SIGNED" ]; }; then tls=spki; spki=$(spki_of "$ETC/cert.pem"); fi
   local text kind=join
   text=$(printf 'server=%s\ncarrier=%s\nws_path=%s\nhttp_path=%s\ntls=%s\nspki=%s\n' "$srv" "$car" "$WS_PATH" "$HTTP_PATH" "$tls" "$spki")
   if [ "${1:-}" = secret ]; then
-    [ -r "$ETC/secret" ] || die "cannot read $ETC/secret (run as root)"
-    text=$(printf '%s\nsecret=%s\n' "$text" "$(tr -d '\n' <"$ETC/secret")"); kind=pair
+    local sf=${SECRET_OVERRIDE:-$ETC/secret}
+    [ -r "$sf" ] || die "cannot read $sf (run as root)"
+    text=$(printf '%s\nsecret=%s\n' "$text" "$(tr -d '\n' <"$sf")"); kind=pair
   fi
   printf 'hstun-%s:%s' "$kind" "$(printf '%s\n' "$text" | base64 -w0)"
 }
@@ -742,6 +768,7 @@ install_exit() {
       own "$SVC_USER:$SVC_USER" "$ETC/cert.pem" "$ETC/key.pem"; chmod 0600 "$ETC/key.pem" ;;
   esac
 
+  want_ipv6
   install_decoy
   render_server_toml
   own "root:$SVC_USER" "$ETC/server.toml"; chmod 0640 "$ETC/server.toml"
@@ -800,7 +827,8 @@ print_exit_summary() {
   echo
   echo "    hstun-ctl entry --join '$pair'"
   echo
-  echo "  If hstun-ctl is not installed there yet, put the one-line installer in front:  bash <(curl -Ls https://raw.githubusercontent.com/$REPO/main/install.sh) entry --join '...'"
+  echo "  If hstun-ctl is not installed there yet, use the installer of this exact version (same release on both hosts):"
+  echo "    bash <(curl -Ls https://raw.githubusercontent.com/$REPO/v$INSTALLER_VERSION/install.sh) entry --join '...'"
   echo "  Print it again any time:  hstun-ctl${NAME:+ --name $NAME} show-join      (without the secret: show-join --no-secret)"
   echo "  Next: make sure your proxy (for example a VLESS inbound) is listening on $FORWARD_TARGET."
   if [ "$MODE" = direct ] && [ -n "$SELF_SIGNED" ] && [ -z "$DOMAIN" ]; then
@@ -975,6 +1003,22 @@ preflight_conf() {
   "$STAGE/hstun" check -config "$ETC/$m.toml" -mode "$m" >/dev/null 2>&1 \
     || die "the new binary rejects $ETC/$m.toml (instance ${NAME:-default}); nothing was changed. Run: $STAGE/hstun check -config $ETC/$m.toml"
 }
+pinned_version() { cat "$ETC_BASE/hstun.pin" 2>/dev/null | head -1 || true; }
+cmd_pin() { # pin VERSION | pin --clear | pin (shows)
+  local v=${FILE:-}
+  if [ "$FINISH" = 1 ] || [ "$v" = clear ]; then need_root; rm -f "${ETC_BASE:?}/hstun.pin"; info "unpinned: update follows the latest release again"; return 0; fi
+  if [ -z "$v" ]; then
+    local cur; cur=$(pinned_version)
+    if [ -n "$cur" ]; then info "pinned to $cur (hstun-ctl pin --clear to follow the latest release)"; else info "not pinned: update follows the latest release"; fi
+    return 0
+  fi
+  need_root
+  v=${v#v}
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "a version looks like 0.4.0"
+  install -d "$ETC_BASE"
+  printf '%s\n' "$v" >"$ETC_BASE/hstun.pin"
+  info "pinned to $v: hstun-ctl update installs exactly this release (an explicit --version still wins; pin --clear to follow the latest)"
+}
 latest_version() { # newest release without the leading v; empty when it cannot be read
   if [ -n "${HSTUN_TEST_LATEST:-}" ]; then echo "$HSTUN_TEST_LATEST"; return 0; fi # test hook
   have jq || return 0
@@ -988,9 +1032,11 @@ cmd_update() {
   if [ -z "${HSTUN_TARBALL:-}" ] && [ "${HSTUN_BUILD:-0}" != 1 ] && [ "$FORCE" != 1 ]; then
     ensure_cmds curl jq
     local want=${WANT_VERSION#v} cur=${before#hstun }
+    [ -n "$want" ] || want=$(pinned_version)
     [ -n "$want" ] || want=$(latest_version)
     if [ -n "$want" ] && [ "$want" = "$cur" ]; then info "already up to date ($cur); nothing was changed (--force reinstalls it)"; return 0; fi
   fi
+  [ -n "$WANT_VERSION" ] || WANT_VERSION=$(pinned_version)
   fetch_release
   local dirs=() d u
   if [ "$ALL" = 1 ]; then
@@ -1249,8 +1295,9 @@ cmd_test() { # end-to-end check of one instance: unit, sessions, and a stream th
     else chk warn "no entry is connected yet"; fi
   fi
   if [ "$ROLE" = entry ]; then
-    local h=${FORWARD_LISTEN%:*} p=${FORWARD_LISTEN##*:} line
-    case "$h" in 0.0.0.0 | "" | "[::]") h=127.0.0.1 ;; esac
+    local h p=${FORWARD_LISTEN##*:} line
+    h=$(unbracket "${FORWARD_LISTEN%:*}")
+    case "$h" in 0.0.0.0 | "" | "::") h=127.0.0.1 ;; esac
     if (exec 7<>"/dev/tcp/$h/$p") 2>/dev/null; then
       # a stream through the tunnel: if the exit cannot reach its target it closes the stream at once
       exec 7<>"/dev/tcp/$h/$p"
@@ -1261,7 +1308,7 @@ cmd_test() { # end-to-end check of one instance: unit, sessions, and a stream th
     else chk fail "nothing listens on $FORWARD_LISTEN on this host" "hstun-ctl restart"; fi
   else
     local t=$FORWARD_TARGET
-    if tcp_ok "${t%:*}" "${t##*:}" 3; then chk ok "forward target $t accepts connections"; else chk fail "forward target $t does not accept connections" "start your proxy (for example the VLESS inbound) there"; fi
+    if tcp_ok "$(unbracket "${t%:*}")" "${t##*:}" 3; then chk ok "forward target $t accepts connections"; else chk fail "forward target $t does not accept connections" "start your proxy (for example the VLESS inbound) there"; fi
     if [ -n "${PORT:-$BACKEND_PORT}" ] && { [ "$TEST" = 1 ] || listening "${PORT:-$BACKEND_PORT}"; }; then chk ok "port ${PORT:-$BACKEND_PORT} is listening"; else chk fail "port ${PORT:-$BACKEND_PORT} is not listening" "hstun-ctl logs"; fi
   fi
   [ "$CHK_FAIL" = 0 ] && info "test passed" || { warn "test found problems"; return 1; }
@@ -1294,6 +1341,20 @@ cmd_doctor() { # read-only checks of this host and one instance
       elif openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1; then chk warn "certificate expires within 14 days" "$cert"
       else chk fail "certificate has expired" "$cert"; fi
     fi
+    if [ "$TEST" != 1 ] && [ -n "$port" ]; then
+      if tcp_ok 127.0.0.1 "$port" 2; then chk ok "port $port answers on IPv4"; else chk fail "port $port does not answer on IPv4 (127.0.0.1)" "hstun-ctl logs"; fi
+      if [ "$IPV6" = 1 ]; then
+        if tcp_ok ::1 "$port" 2; then chk ok "port $port answers on IPv6 (::1)"; else chk fail "port $port does not answer on IPv6" "the exit is set up for IPv6 but nothing listens on [::]:$port"; fi
+      fi
+    fi
+    if [ -n "$DOMAIN" ] && [ "$TEST" != 1 ]; then
+      local aaaa; aaaa=$(getent ahostsv6 "$DOMAIN" 2>/dev/null | awk '$1 !~ /^::ffff:/ {print $1; exit}')
+      if [ -n "$aaaa" ] && [ "$IPV6" != 1 ] && [ "$MODE" != cloudflared ]; then
+        chk fail "$DOMAIN has an IPv6 (AAAA) record ($aaaa) but this exit does not listen on IPv6" "clients that prefer IPv6 cannot connect: remove the AAAA record or reinstall with --ipv6"
+      elif [ -n "$aaaa" ] && [ "$IPV6" = 1 ]; then
+        if ip -6 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qx "$aaaa"; then chk ok "AAAA record $aaaa belongs to this host"; else chk warn "AAAA record $aaaa is not an address of this host" "fine behind a CDN, otherwise fix the DNS record"; fi
+      fi
+    fi
     if [ -n "$DOMAIN" ]; then
       local ip mine; ip=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1; exit}')
       mine=$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ')
@@ -1305,11 +1366,12 @@ cmd_doctor() { # read-only checks of this host and one instance
       if ufw status | grep -qE "^$port(/tcp)?[[:space:]]"; then chk ok "ufw allows port $port"; else chk warn "no ufw rule for port $port" "ufw allow $port/tcp"; fi
     fi
   else
-    local sh=${SERVER%:*} sp=${SERVER##*:}
+    local sh sp=${SERVER##*:}
+    sh=$(unbracket "${SERVER%:*}")
     if [ "$TEST" != 1 ]; then
       if getent hosts "$sh" >/dev/null 2>&1 || [[ "$sh" =~ ^[0-9.]+$ ]]; then chk ok "exit address $sh resolves"; else chk fail "exit address $sh does not resolve"; fi
-      local tgt=${CONNECT:-$sh:$sp}
-      if tcp_ok "${tgt%:*}" "${tgt##*:}" 5; then chk ok "TCP connection to the exit ($tgt) works"; else chk fail "cannot open a TCP connection to the exit ($tgt)" "firewall or blocked route; try --carrier chunk through a CDN"; fi
+      local tgt=${CONNECT:-$(bracket "$sh"):$sp}
+      if tcp_ok "$(unbracket "${tgt%:*}")" "${tgt##*:}" 5; then chk ok "TCP connection to the exit ($tgt) works"; else chk fail "cannot open a TCP connection to the exit ($tgt)" "firewall or blocked route; try --carrier chunk through a CDN"; fi
     fi
   fi
   cmd_test || CHK_FAIL=1
@@ -1352,6 +1414,69 @@ cmd_rollback() { # put the previous binary back (the .prev copy every update lea
   cp -p "$b" "$b.next"; cp -p "$b.prev" "$b"; mv "$b.next" "$b.prev"
   local u; for u in $(daemon_units); do sysd restart "$u"; done
   info "rolled back to $("$b" version 2>/dev/null) (the newer one is kept as $b.prev, run rollback again to return)"
+}
+
+# ---------- secret rotation ----------
+# Exit: `rotate-secret` adds a second secret next to the first (both are accepted), prints the new pair code;
+# every entry runs `rotate-secret --join CODE`; then `rotate-secret --finish` on the exit drops the old secret.
+rotate_set_secret_files() { # CONFIG VALUE-LINE
+  local cfg=$1 line=$2 cur="secret_files = [\"$ETC/secret\"]" cur2="secret_files = [\"$ETC/secret\", \"$ETC/secret.new\"]"
+  if grep -qF -- "$cur" "$cfg" || grep -qF -- "$cur2" "$cfg"; then
+    local tmp; tmp=$(mktemp)
+    awk -v want="$line" -v c1="$cur" -v c2="$cur2" 'index($0, c1) == 1 || index($0, c2) == 1 { print want; next } { print }' "$cfg" >"$tmp" && cat "$tmp" >"$cfg"
+    rm -f "$tmp"
+  else die "$cfg has a secret_files line this command does not know; edit it by hand (list both secret files, restart, then remove the old one)"; fi
+}
+cmd_rotate_secret() {
+  need_root; set_paths; need_installed
+  if [ "$ROLE" = entry ]; then
+    [ -n "$JOIN" ] || die "on an entry run: hstun-ctl rotate-secret --join 'hstun-pair:...' (the new pair code printed by the exit)"
+    parse_join
+    [ -n "$JOIN_SECRET" ] || die "that code has no secret: use the hstun-pair code from 'hstun-ctl rotate-secret' on the exit"
+    cp -p "$ETC/secret" "$ETC/secret.prev"
+    ( umask 077; printf '%s\n' "$JOIN_SECRET" >"$ETC/secret" ); own "$SVC_USER:$SVC_USER" "$ETC/secret"; chmod 0600 "$ETC/secret"
+    local u; for u in $(daemon_units); do sysd restart "$u"; done
+    if health_ok; then rm -f "$ETC/secret.prev"; info "the entry now uses the new secret and its tunnel is up"
+    else
+      mv -f "$ETC/secret.prev" "$ETC/secret"; for u in $(daemon_units); do sysd restart "$u"; done
+      die "the tunnel did not come up with the new secret; the old secret is back. Is the rotation started on the exit, and is the code complete?"
+    fi
+    return 0
+  fi
+  local cfg="$ETC/server.toml" u
+  if [ "$FINISH" = 1 ]; then
+    [ -s "$ETC/secret.new" ] || die "no rotation in progress"
+    confirm "Drop the old secret now? Entries that still use it will be refused." n || { info "nothing changed"; return 0; }
+    cp -p "$cfg" "$cfg.pre-rotate"
+    mv -f "$ETC/secret.new" "$ETC/secret"
+    rotate_set_secret_files "$cfg" "secret_files = [\"$ETC/secret\"]"
+    "$(inst_bin)" check -config "$cfg" -mode server >/dev/null 2>&1 || { mv -f "$cfg.pre-rotate" "$cfg"; die "the new configuration is rejected; nothing changed"; }
+    for u in $(daemon_units); do sysd restart "$u"; done
+    rm -f "$cfg.pre-rotate"
+    info "rotation finished: only the new secret is accepted"
+    return 0
+  fi
+  if [ -s "$ETC/secret.new" ]; then
+    warn "a rotation is already in progress. Pair code with the new secret:"
+    SECRET_OVERRIDE="$ETC/secret.new"; echo "  hstun-ctl rotate-secret --join '$(make_join secret)'"
+    echo "  When every entry uses it, run on this host: hstun-ctl${NAME:+ --name $NAME} rotate-secret --finish"
+    return 0
+  fi
+  cp -p "$cfg" "$cfg.pre-rotate"
+  "$(inst_bin)" keygen -out "$ETC/secret.new" >/dev/null
+  own "$SVC_USER:$SVC_USER" "$ETC/secret.new"; chmod 0600 "$ETC/secret.new"
+  rotate_set_secret_files "$cfg" "secret_files = [\"$ETC/secret\", \"$ETC/secret.new\"]"
+  if ! "$(inst_bin)" check -config "$cfg" -mode server >/dev/null 2>&1; then mv -f "$cfg.pre-rotate" "$cfg"; rm -f "$ETC/secret.new"; die "the configuration with two secrets is rejected; nothing changed"; fi
+  for u in $(daemon_units); do sysd restart "$u"; done
+  if ! health_ok; then
+    mv -f "$cfg.pre-rotate" "$cfg"; rm -f "$ETC/secret.new"; for u in $(daemon_units); do sysd restart "$u"; done
+    die "the exit did not come back with two secrets; the previous configuration is restored"
+  fi
+  rm -f "$cfg.pre-rotate"
+  info "rotation started: the exit accepts the old and the new secret. Nothing is interrupted."
+  echo "  1. On every entry run (the code contains the new secret, send it privately):"
+  SECRET_OVERRIDE="$ETC/secret.new"; echo "       hstun-ctl rotate-secret --join '$(make_join secret)'"
+  echo "  2. When every entry is done, run here:  hstun-ctl${NAME:+ --name $NAME} rotate-secret --finish"
 }
 
 # ---------- backup and restore ----------
@@ -1438,6 +1563,7 @@ instance_line() { # config directory: one status line
 }
 update_banner() { # one red line when a newer release exists; cached for 6 hours, never waits long
   [ "${HSTUN_NO_UPDATE_CHECK:-0}" = 1 ] && return 0
+  if [ -n "$(pinned_version)" ]; then printf '%s\n' "${D}  Pinned to $(pinned_version): update installs exactly that release.${N}"; return 0; fi
   have jq || return 0
   local cache="$ETC_BASE/.hstun-latest" latest="" cur
   if [ -f "$cache" ] && [ -n "$(find "$cache" -mmin -360 2>/dev/null)" ]; then latest=$(cat "$cache" 2>/dev/null || true)
@@ -1481,6 +1607,13 @@ pick_instance() { # [role]: sets NAME to the instance to act on (asks when there
 act_status() { local d; while IFS= read -r d; do reset_conf; NAME=$(name_of "$d"); set_paths; cmd_status; echo; done < <(list_instances); }
 act_pair() { pick_instance exit && { need_installed; echo "Send this one command to the entry host. It contains the secret, so use a private channel:"; echo; echo "  hstun-ctl entry --join '$(make_join secret)'"; }; }
 act_logs() { pick_instance && { FOLLOW=1; echo "Live log. Press Ctrl+C to return to the menu."; cmd_logs; }; }
+act_pin() { local v=""; ask v "Version to pin (for example 0.4.0; empty = follow the latest release)" "" opt; FINISH=0; if [ -z "$v" ]; then FINISH=1; fi; FILE=$v; cmd_pin; }
+act_rotate() {
+  pick_instance || return 0
+  local role; role=$(sed -n 's/^ROLE=//p' "$ETC/install.conf" | head -1)
+  if [ "$role" = entry ]; then ask JOIN "Paste the new pair code printed by the exit's rotate-secret" ""; fi
+  cmd_rotate_secret
+}
 act_test() { pick_instance && cmd_test; }
 act_doctor() { pick_instance && cmd_doctor; }
 act_edit() { pick_instance && cmd_edit; }
@@ -1505,7 +1638,7 @@ menu() {
   trap ':' INT # Ctrl+C stops a live log and returns here instead of leaving the script
   local c i d insts labels actions hints
   while true; do
-    reset_conf; NAME=""; set_paths; SKIP_LOAD=""; FOLLOW=0; ALL=0; PURGE=0
+    reset_conf; NAME=""; set_paths; SKIP_LOAD=""; FOLLOW=0; ALL=0; PURGE=0; FINISH=0; FILE=""; JOIN=""; JOIN_SECRET=""
     insts=$(list_instances)
     labels=(); actions=(); hints=()
     echo
@@ -1525,7 +1658,9 @@ menu() {
       labels+=("Settings"); actions+=(act_edit); hints+=("change port, domain, target...; undone automatically if it breaks")
       labels+=("Restart"); actions+=(act_restart); hints+=("restart the tunnel service")
       labels+=("Update"); actions+=(act_update); hints+=("latest release; nothing happens when you are current")
+      labels+=("Pin a version"); actions+=(act_pin); hints+=("keep every host on one release; update installs exactly it")
       labels+=("Roll back the last update"); actions+=(act_rollback); hints+=("go back to the previous binary")
+      labels+=("Rotate the secret"); actions+=(act_rotate); hints+=("new secret without downtime: exit first, then each entry")
       labels+=("Backup"); actions+=(cmd_backup); hints+=("one private archive with settings, secrets and certificates")
       labels+=("Restore a backup"); actions+=(act_restore); hints+=("check a backup first, then restore it")
       labels+=("Install another instance"); actions+=(act_install_more); hints+=("a second exit or entry on this host")
@@ -1561,6 +1696,8 @@ hstun installer/manager $INSTALLER_VERSION
     test       end-to-end check of the tunnel         doctor   checks of this host, certificate, DNS, firewall, then test
     edit       change settings, undone if the tunnel does not come back
     rollback   go back to the previous binary          backup FILE / restore FILE [--test]   all instances in one private archive
+    rotate-secret [--finish | --join CODE]   new secret without downtime (exit starts, entries follow, exit finishes)
+    pin VERSION | pin --clear   make update install exactly one release (keep every host on the same one)
 
 Common:    --name NAME   --yes   --version X.Y.Z   --repo OWNER/REPO   --no-firewall
 Exit:      --mode nginx|direct|cloudflared   --forward-target HOST:PORT   --port N   --domain D
@@ -1570,7 +1707,7 @@ Entry:     --join STRING   --server HOST:PORT   --carrier ws|http|chunk   --ws-p
            --connect IP:PORT   --sni NAME   --forward-listen ADDR:PORT   --forward-name NAME   --conns N
            --chunk-parallel N   --socks ADDR:PORT
 Install:   --reconfigure (change an installed instance)   --reinstall (new certificate, secret, paths)   --new-cert   --customize (entry: ask the advanced questions)
-Manage:    --force (update even when current)   --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)   --file FILE, --test (backup/restore)   --no-secret (show-join)
+Manage:    --force (update even when current)   --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)   --file FILE, --test (backup/restore)   --ipv6 / --no-ipv6 (exit listens on IPv6 too; default: detected)   --no-secret (show-join)
 
 Environment: GITHUB_TOKEN (private repository), HSTUN_REPO, HSTUN_VERSION, HSTUN_TARBALL=FILE (offline), HSTUN_BUILD=1 (build from source).
 EOF
@@ -1580,7 +1717,7 @@ EOF
 CMD=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    exit | entry | status | logs | restart | update | show-join | show-secret | uninstall | adopt | forget | test | doctor | edit | rollback | backup | restore | version | menu | help) CMD=$1 ;;
+    exit | entry | status | logs | restart | update | show-join | show-secret | uninstall | adopt | forget | test | doctor | edit | rollback | backup | restore | rotate-secret | pin | version | menu | help) CMD=$1 ;;
     install) ;;
     --name) NAME=$2; shift ;;
     --yes | -y) YES=1 ;;
@@ -1617,6 +1754,10 @@ while [ $# -gt 0 ]; do
     --socks) SOCKS_LISTEN=$2; shift ;;
     --purge) PURGE=1 ;;
     --force) FORCE=1 ;;
+    --finish) FINISH=1 ;;
+    --clear) FINISH=1 ;;
+    --ipv6) IPV6=1 ;;
+    --no-ipv6) IPV6=0 ;;
     --test) FILE_TEST=1 ;;
     --file) FILE=$2; shift ;;
     --reconfigure) RECONFIGURE=1 ;;
@@ -1629,7 +1770,7 @@ while [ $# -gt 0 ]; do
     --unit) ADOPT_ONLY=$2; shift ;;
     -f) FOLLOW=1 ;;
     -h | --help) CMD=help ;;
-    *) if { [ "$CMD" = backup ] || [ "$CMD" = restore ]; } && [ -z "$FILE" ]; then FILE=$1; else die "unknown argument: $1 (see: install.sh help)"; fi ;;
+    *) if { [ "$CMD" = backup ] || [ "$CMD" = restore ] || [ "$CMD" = pin ]; } && [ -z "$FILE" ]; then FILE=$1; else die "unknown argument: $1 (see: install.sh help)"; fi ;;
   esac
   shift
 done
@@ -1654,6 +1795,8 @@ case "$CMD" in
   rollback) cmd_rollback ;;
   backup) cmd_backup ;;
   restore) cmd_restore ;;
+  rotate-secret) cmd_rotate_secret ;;
+  pin) cmd_pin ;;
   version) cmd_version ;;
   help) usage ;;
   menu | "") if [ -n "$TTY" ]; then menu; else usage; fi ;;

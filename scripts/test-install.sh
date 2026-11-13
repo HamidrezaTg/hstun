@@ -87,6 +87,19 @@ HSTUN_TTY="$T/ans3" ./install.sh exit --mode direct --forward-target "127.0.0.1:
 [ "$(sha256sum "$T/etc/hstun/cert.pem" | cut -d' ' -f1)" != "$cert_now" ] && [ "$(sha256sum "$T/etc/hstun/secret" | cut -d' ' -f1)" != "$secret_now" ] || fail "reinstall kept the old certificate or secret"
 ok "'reinstall' makes a new certificate and secret"
 
+# --- IPv6: --ipv6 makes the exit listen dual-stack and the config stays valid ---
+./install.sh exit --yes --name v6 --mode direct --ipv6 --forward-target "127.0.0.1:$((base + 1))" --port "$((base + 50))" --backend-port "$((base + 51))" >"$T/v6.log" 2>&1 || { cat "$T/v6.log"; fail "exit --ipv6"; }
+grep -q 'listen       = "\[::\]:' "$T/etc/hstun-v6/server.toml" || fail "--ipv6 did not make the exit listen on [::]"
+J6=$("$T/bin/hstun-ctl" --name v6 show-join --no-secret 2>/dev/null); echo "${J6#hstun-join:}" | base64 -d | grep -q '^server=' || fail "join string of the ipv6 exit"
+./install.sh exit --yes --name v4 --mode direct --no-ipv6 --forward-target "127.0.0.1:$((base + 1))" --port "$((base + 52))" --backend-port "$((base + 53))" >/dev/null 2>&1 || fail "exit --no-ipv6"
+grep -q 'listen       = "0.0.0.0:' "$T/etc/hstun-v4/server.toml" || fail "--no-ipv6 did not keep IPv4 only"
+./install.sh uninstall --yes --purge --name v6 >/dev/null 2>&1; ./install.sh uninstall --yes --purge --name v4 >/dev/null 2>&1
+ok "--ipv6 listens on [::], --no-ipv6 on 0.0.0.0"
+
+# --- the printed entry command names this exact release ---
+grep -q "raw.githubusercontent.com/.*/v$(sed -n 's/^INSTALLER_VERSION="\(.*\)"/\1/p' install.sh)/install.sh" "$T/exit.log" || fail "exit summary does not give the versioned installer URL"
+ok "the exit prints the installer URL of its own release"
+
 # --- update is a no-op when current ---
 cur=$("$T/bin/hstun" version | sed 's/^hstun //')
 env -u HSTUN_TARBALL HSTUN_TEST_LATEST="$cur" "$T/bin/hstun-ctl" update >"$T/upd.log" 2>&1 || { cat "$T/upd.log"; fail "update"; }

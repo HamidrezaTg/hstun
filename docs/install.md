@@ -86,12 +86,13 @@ Useful flags: `--carrier ws|http|chunk` (`chunk` for a path that cuts long conne
 | `--decoy-dir DIR`, `--public-addr ADDR` | exit | your own decoy site; the address printed in the pair code |
 | `--ws-path P`, `--http-path P` | exit | secret paths (random by default) |
 | `--join STRING` | entry | the pair code (or secret-less join string) printed by the exit |
-| `--server HOST:PORT`, `--carrier ws\|http\|chunk`, `--tls-verify system\|spki`, `--spki HEX` | entry | only needed without a pair code |
+| `--server HOST:PORT`, `--carrier ws\|http\|chunk\|auto`, `--tls-verify system\|spki`, `--spki HEX` | entry | only needed without a pair code |
 | `--connect IP:PORT`, `--sni NAME` | entry | dial this address instead of resolving; send this TLS server name |
 | `--forward-listen ADDR:PORT`, `--forward-name NAME` | entry | where your proxy clients connect; the forward's name (default `x1`) |
 | `--conns N`, `--chunk-parallel N`, `--socks ADDR:PORT` | entry | parallel connections, chunk requests in flight, optional SOCKS5 listener |
 | `--secret-file FILE`, `--secret-from USER@HOST[:PORT]` | entry | secret from a file, or fetched over ssh (rarely needed; the pair code carries it) |
 | `--reconfigure`, `--reinstall`, `--new-cert`, `--customize` | exit/entry | change an installed instance; start from scratch; new self-signed certificate; ask the advanced questions |
+| `--ipv6`, `--no-ipv6` | exit | listen on IPv6 too (dual-stack) or IPv4 only; default: detected |
 | `--no-firewall` | all | do not touch ufw |
 | `--version X.Y.Z`, `--repo OWNER/REPO`, `--force` | install/update | pin a release, use a fork, update even when current |
 

@@ -348,5 +348,8 @@ func refuseStreams(ms interface {
 // Sessions returns the number of live tunnel sessions.
 func (s *Server) Sessions() int { return s.hub.Count() }
 
+// SessionList describes the live sessions (for tests and tools).
+func (s *Server) SessionList() []entry.SessionInfo { return s.hub.Snapshot() }
+
 // OpenForTest opens a forward stream by name (entry role); for loopback tests.
 func (s *Server) OpenForTest(name string) (net.Conn, byte, error) { return s.entry.OpenForTest(name) }

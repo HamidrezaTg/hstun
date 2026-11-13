@@ -13,6 +13,12 @@ Two separate choices: how the **exit** is reached (mode), and how the **entry** 
 
 `ws` is the default and is chosen for you: the carrier is part of the pair code. Change it with `--carrier` on the entry.
 
+**Not sure which carrier your path allows?** Install the entry with `--carrier auto`: it starts on `ws`, moves to `http` and then `chunk` after three failed attempts in a row, and tries the better ones again every 10 minutes (moving back as soon as one works). `hstun-ctl status` and the admin `/stats` show the carrier in use. Optional `auto_order = ["ws", "chunk"]` in `client.toml` narrows or reorders the list. The exit needs the `http` carrier enabled (it is by default).
+
+## IPv4 and IPv6
+
+On a host with working IPv6 the installer makes the exit listen on both families (`[::]`, dual-stack; nginx gets a second `listen [::]:PORT`) and puts the per-source connection cap on IPv6 too (per /64, because one host can use a whole /64). `--ipv6` forces it, `--no-ipv6` keeps IPv4 only. If the domain has an AAAA record the exit must listen on IPv6, otherwise clients that prefer IPv6 cannot connect: `hstun-ctl doctor` checks exactly that. Addresses in `--server`, `--connect` and `--public-addr` may be IPv6 literals in brackets (`[2001:db8::1]:443`).
+
 ## Exit modes (`--mode`)
 
 | mode | what it does | you need |

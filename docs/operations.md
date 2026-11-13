@@ -13,6 +13,8 @@
 | `hstun-ctl edit` | change settings (interactive or with flags such as `--port`); undone automatically if the tunnel does not come back healthy |
 | `hstun-ctl update [--all] [--force]` | download the latest release, check it accepts every instance's config, replace the binary (previous one kept as `hstun.prev`), restart, roll back by itself if the tunnel does not come back; does nothing when already current |
 | `hstun-ctl rollback` | go back to the previous binary (run again to return) |
+| `hstun-ctl pin VERSION` / `pin --clear` | make `update` install exactly one release, so every host stays on the same one |
+| `hstun-ctl rotate-secret` | new secret without downtime, see below |
 | `hstun-ctl show-join [--no-secret]` | the pair code for an entry (contains the secret); `--no-secret` prints the join string without it |
 | `hstun-ctl show-secret` | the exit's secret |
 | `hstun-ctl backup [FILE]` | one private `.tar.gz` with every instance: settings, secrets, certificates, units |
@@ -24,6 +26,20 @@ Re-running the installer for an instance that exists shows what it has and asks:
 paired entries keep working), or reinstall from scratch (new certificate and secret: every entry must be paired again).
 
 Several instances can live on one host (`--name NAME` on every command, or pick from the menu).
+
+## Rotating the secret
+
+The exit accepts several secrets at once, so nothing has to be interrupted:
+
+1. On the exit: `hstun-ctl rotate-secret`. It adds a second secret next to the first, restarts the service, checks that it is healthy (and undoes everything if it is not), and prints a new pair code.
+2. On every entry: `hstun-ctl rotate-secret --join 'hstun-pair:...'`. The entry switches to the new secret, and goes back to the old one if its tunnel does not come up.
+3. On the exit, when every entry is done: `hstun-ctl rotate-secret --finish`. Only the new secret is accepted from then on.
+
+Run `hstun-ctl rotate-secret` again at any time during step 2 to print the same pair code. The menu has the same steps under *Rotate the secret*.
+
+## Keeping hosts on one release
+
+`hstun-ctl pin 0.4.0` stores the version; `hstun-ctl update` then installs exactly that release (and the menu stops announcing newer ones). `pin --clear` goes back to following the latest. The exit prints the entry's command with the installer URL of its own release (`.../vX.Y.Z/install.sh`), so both hosts start on the same version.
 
 ## Adopting a hand-installed setup
 

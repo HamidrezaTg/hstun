@@ -25,7 +25,7 @@ import (
 	"time"
 )
 
-// Cert writes a self-signed ECDSA certificate for localhost and 127.0.0.1 and
+// Cert writes a self-signed ECDSA certificate for localhost, 127.0.0.1 and ::1 and
 // returns the cert path and key path (the cert doubles as its own CA file).
 func Cert(t testing.TB) (certPath, keyPath string) {
 	t.Helper()
@@ -43,7 +43,7 @@ func Cert(t testing.TB) (certPath, keyPath string) {
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &priv.PublicKey, priv)
 	if err != nil {
