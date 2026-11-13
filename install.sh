@@ -15,7 +15,7 @@
 # so it runs unattended with --yes. See README.md ("Install").
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.2.10"
+INSTALLER_VERSION="0.2.11"
 REPO="${HSTUN_REPO:-HamidrezaTg/hstun}"
 WANT_VERSION="${HSTUN_VERSION:-}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
@@ -190,8 +190,9 @@ fetch_release() {
 install_files() {
   [ -x "$STAGE/hstun" ] || die "the release has no hstun binary"
   install -d "$BIN_DIR" "$SHARE_DIR"
+  [ -x "$BIN_DIR/hstun" ] && cp -p "$BIN_DIR/hstun" "$BIN_DIR/hstun.prev"
   install -m 0755 "$STAGE/hstun" "$BIN_DIR/hstun"
-  rm -rf "$SHARE_DIR/deploy" "$SHARE_DIR/decoy-example"
+  rm -rf "$SHARE_DIR/deploy" "$SHARE_DIR/decoy-example" "$SHARE_DIR/licenses"
   cp -r "$STAGE/share/." "$SHARE_DIR/"
   install -m 0755 "$STAGE/share/install.sh" "$BIN_DIR/hstun-ctl"
   info "installed $("$BIN_DIR/hstun" version) to $BIN_DIR"
@@ -202,7 +203,8 @@ NAME=""
 ROLE="" MODE="" FORWARD_TARGET="" PORT="" DOMAIN="" CERT="" KEY="" ACME="" EMAIL="" ALLOW_FROM="" DECOY_DIR="" BACKEND_PORT=""
 JOIN="" SERVER="" CARRIER="" WS_PATH="" HTTP_PATH="" SECRET_FILE="" SECRET_FROM="" TLS_VERIFY="" SPKI="" CONNECT="" SNI=""
 FORWARD_LISTEN="" FORWARD_NAME="" CONNS="" CHUNK_PARALLEL="" SOCKS_LISTEN="" NO_FW="" ADMIN_PORT="" SELF_SIGNED="" PUBLIC_ADDR=""
-FOLLOW=0 PURGE=0 ALL=0
+FOLLOW=0 PURGE=0 ALL=0 DRY_RUN=0 ADOPT_ONLY=""
+ADOPTED="" ADOPT_UNITS="" ADOPT_BIN=""
 
 set_paths() {
   ETC="$ETC_BASE/hstun${NAME:+-$NAME}"
@@ -210,7 +212,8 @@ set_paths() {
   DECOY_TARGET="$WWW_DIR/hstun${NAME:+-$NAME}-decoy"
 }
 CONF_KEYS=(ROLE MODE FORWARD_TARGET PORT DOMAIN CERT KEY BACKEND_PORT ADMIN_PORT WS_PATH HTTP_PATH SERVER CARRIER TLS_VERIFY SPKI CONNECT SNI
-  FORWARD_LISTEN FORWARD_NAME CONNS CHUNK_PARALLEL SOCKS_LISTEN ALLOW_FROM PUBLIC_ADDR FW_PORTS CONNLIMIT_PORT SELF_SIGNED)
+  FORWARD_LISTEN FORWARD_NAME CONNS CHUNK_PARALLEL SOCKS_LISTEN ALLOW_FROM PUBLIC_ADDR FW_PORTS CONNLIMIT_PORT SELF_SIGNED
+  ADOPTED ADOPT_UNITS ADOPT_BIN)
 FW_PORTS="" CONNLIMIT_PORT=""
 load_conf() { # saved values only fill what is still empty (flags win)
   [ -f "$ETC/install.conf" ] || return 0
@@ -224,6 +227,15 @@ save_conf() {
   local k
   { for k in "${CONF_KEYS[@]}"; do printf '%s=%q\n' "$k" "${!k-}"; done; } >"$ETC/install.conf"
   chmod 0600 "$ETC/install.conf"
+}
+reset_conf() { local k; for k in "${CONF_KEYS[@]}"; do printf -v "$k" '%s' ""; done; }
+inst_bin() { echo "${ADOPT_BIN:-$BIN_DIR/hstun}"; }
+# an existing hstun that this script did not create must never be overwritten by an install
+guard_existing() {
+  if [ -n "$ADOPTED" ]; then die "instance ${NAME:-default} was adopted from a hand-made setup; install would rewrite its files. Use update, restart or uninstall, or pick another --name."; fi
+  if [ ! -f "$ETC/install.conf" ] && { [ -f "$ETC/server.toml" ] || [ -f "$ETC/client.toml" ]; }; then
+    die "found an hstun setup in $ETC that was not installed by hstun-ctl. Run: install.sh adopt   (or choose another --name)"
+  fi
 }
 need_installed() { [ -f "$ETC/install.conf" ] || die "no hstun instance${NAME:+ named $NAME} found in $ETC (install it first)"; load_conf; }
 
@@ -621,7 +633,7 @@ start_unit() { # unit
 
 install_exit() {
   need_root
-  set_paths; load_conf
+  set_paths; load_conf; guard_existing
   ROLE="exit"
   if [ -z "$MODE" ]; then
     if [ "$YES" != 1 ] && [ -n "$TTY" ]; then
@@ -764,7 +776,7 @@ parse_join() {
 }
 install_entry() {
   need_root
-  set_paths; load_conf
+  set_paths; load_conf; guard_existing
   ROLE=entry
   [ -n "$JOIN" ] && parse_join
   ask SERVER "Exit address (host:port)" ""
@@ -827,15 +839,32 @@ install_entry() {
 # ---------- management ----------
 units_of_instance() {
   local u
+  if [ -n "$ADOPTED" ]; then for u in $ADOPT_UNITS; do echo "$u"; done; return 0; fi
   for u in server client nginx nginx-reload nginx-reload.path nginx-reload.timer; do
     [ -f "$SYSTEMD_DIR/$UNIT-$u.service" ] && echo "$UNIT-$u.service"
     [ -f "$SYSTEMD_DIR/$UNIT-$u" ] && echo "$UNIT-$u"
   done
 }
+daemon_units() { # the unit that runs the hstun process
+  local u
+  if [ -n "$ADOPTED" ]; then echo "${ADOPT_UNITS%% *}"; return 0; fi
+  for u in $(units_of_instance); do case "$u" in *-server.service | *-client.service) echo "$u" ;; esac; done
+}
+service_units() { # hstun process plus the nginx in front of it
+  daemon_units
+  local u
+  for u in $(units_of_instance); do
+    if [ -n "$ADOPTED" ]; then
+      case "$u" in "${ADOPT_UNITS%% *}" | *reload* | *.path | *.timer) ;; *) echo "$u" ;; esac
+    else
+      case "$u" in *-nginx.service) echo "$u" ;; esac
+    fi
+  done
+}
 cmd_status() {
   set_paths; need_installed
-  echo "instance   ${NAME:-default}   role $ROLE${MODE:+   mode $MODE}   config $ETC"
-  echo "binary     $("$BIN_DIR/hstun" version 2>/dev/null || echo missing)"
+  echo "instance   ${NAME:-default}   role $ROLE${MODE:+   mode $MODE}   config $ETC${ADOPTED:+   (adopted)}"
+  echo "binary     $("$(inst_bin)" version 2>/dev/null || echo missing)   $(inst_bin)"
   local u
   for u in $(units_of_instance); do printf '%-40s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"; done
   if [ -n "$ADMIN_PORT" ]; then
@@ -849,30 +878,42 @@ cmd_logs() {
   set_paths; need_installed
   local args=(-n 100 --no-pager); [ "$FOLLOW" = 1 ] && args=(-n 50 -f)
   local u us=()
-  for u in $(units_of_instance); do case "$u" in *-server.service | *-client.service | *-nginx.service) us+=(-u "$u") ;; esac; done
+  for u in $(service_units); do us+=(-u "$u"); done
   journalctl "${us[@]}" "${args[@]}"
 }
 cmd_restart() {
   need_root; set_paths; need_installed
   local u
-  for u in $(units_of_instance); do case "$u" in *-server.service | *-client.service | *-nginx.service) sysd restart "$u"; info "restarted $u" ;; esac; done
+  for u in $(service_units); do sysd restart "$u"; info "restarted $u"; done
+}
+# the new binary must accept this instance's configuration before anything is replaced
+preflight_conf() {
+  local m=server; [ "$ROLE" = entry ] && m=client
+  "$STAGE/hstun" check -config "$ETC/$m.toml" -mode "$m" >/dev/null 2>&1 \
+    || die "the new binary rejects $ETC/$m.toml (instance ${NAME:-default}); nothing was changed. Run: $STAGE/hstun check -config $ETC/$m.toml"
 }
 cmd_update() {
   need_root; set_paths; need_installed
-  local before; before=$("$BIN_DIR/hstun" version 2>/dev/null || true)
-  fetch_release; install_files
-  local d u
+  local before; before=$("$(inst_bin)" version 2>/dev/null || true)
+  fetch_release
+  local dirs=() d u
   if [ "$ALL" = 1 ]; then
-    for d in "$ETC_BASE"/hstun "$ETC_BASE"/hstun-*; do
-      [ -f "$d/install.conf" ] || continue
-      NAME=${d##*/hstun}; NAME=${NAME#-}; set_paths
-      for u in $(units_of_instance); do case "$u" in *-server.service | *-client.service) sysd restart "$u" ;; esac; done
-    done
-  else
-    for u in $(units_of_instance); do case "$u" in *-server.service | *-client.service) sysd restart "$u" ;; esac; done
-    info "restarted this instance only; other instances keep running the old binary until restarted (hstun-ctl update --all)"
-  fi
-  info "updated: $before -> $("$BIN_DIR/hstun" version)"
+    for d in "$ETC_BASE"/hstun "$ETC_BASE"/hstun-*; do [ -f "$d/install.conf" ] && dirs+=("$d"); done
+  else dirs=("$ETC"); fi
+  for d in "${dirs[@]}"; do ( reset_conf; NAME=${d##*/hstun}; NAME=${NAME#-}; set_paths; load_conf; preflight_conf ); done
+  install_files
+  for d in "${dirs[@]}"; do
+    (
+      reset_conf; NAME=${d##*/hstun}; NAME=${NAME#-}; set_paths; load_conf
+      if [ -n "$ADOPT_BIN" ] && [ "$ADOPT_BIN" != "$BIN_DIR/hstun" ]; then
+        [ -x "$ADOPT_BIN" ] && cp -p "$ADOPT_BIN" "$ADOPT_BIN.prev"
+        install -m 0755 "$BIN_DIR/hstun" "$ADOPT_BIN"
+      fi
+      for u in $(daemon_units); do sysd restart "$u"; done
+    )
+  done
+  [ "$ALL" = 1 ] || info "restarted this instance only; other instances keep running the old binary until restarted (hstun-ctl update --all)"
+  info "updated: $before -> $("$(inst_bin)" version)   (previous binary kept as $(inst_bin).prev)"
 }
 cmd_show_join() {
   set_paths; need_installed
@@ -890,21 +931,159 @@ cmd_uninstall() {
   local u
   for u in $(units_of_instance); do
     sysd disable --now "$u" >/dev/null 2>&1 || true
-    rm -f "$SYSTEMD_DIR/$u"
+    rm -f "${SYSTEMD_DIR:?}/${u:?}"
   done
   sysd daemon-reload
   fw_remove
-  rm -f "/etc/letsencrypt/renewal-hooks/deploy/$UNIT.sh"
+  rm -f "/etc/letsencrypt/renewal-hooks/deploy/${UNIT:?}.sh"
+  [ -n "$ADOPTED" ] && info "firewall rules and certificates of an adopted instance were not created by hstun-ctl and are left in place"
   if [ "$PURGE" = 1 ]; then
-    rm -rf "$ETC"; [ -d "$DECOY_TARGET" ] && [ -z "$DECOY_DIR" ] && rm -rf "$DECOY_TARGET"
+    [ -n "$ADOPT_BIN" ] && [ "$ADOPT_BIN" != "$BIN_DIR/hstun" ] && rm -f "$ADOPT_BIN" "$ADOPT_BIN.prev"
+    rm -rf "${ETC:?}"; [ -d "$DECOY_TARGET" ] && [ -z "$DECOY_DIR" ] && rm -rf "${DECOY_TARGET:?}"
     info "removed $ETC (configuration, secret and certificate)"
     local left=0 d
     for d in "$ETC_BASE"/hstun "$ETC_BASE"/hstun-*; do [ -f "$d/install.conf" ] && left=$((left + 1)); done
-    if [ "$left" = 0 ]; then rm -f "$BIN_DIR/hstun" "$BIN_DIR/hstun-ctl"; rm -rf "$SHARE_DIR"; info "no instances left: removed the binary and shared files"; fi
+    if [ "$left" = 0 ]; then rm -f "${BIN_DIR:?}/hstun" "$BIN_DIR/hstun.prev" "$BIN_DIR/hstun-ctl"; rm -rf "${SHARE_DIR:?}"; info "no instances left: removed the binary and shared files"; fi
   else
+    [ -n "$ADOPTED" ] && rm -f "${ETC:?}/install.conf"
     info "services removed; configuration and secret kept in $ETC (add --purge to delete them)"
   fi
 }
+
+# ---------- adopting hand-installed instances ----------
+# toml_val FILE KEY [SECTION]: first `KEY = value` (quotes and trailing comments stripped); with SECTION only inside [SECTION] / [[SECTION]]
+toml_val() {
+  awk -v k="$2" -v want="${3:-}" '
+    /^[ \t]*\[/ { sec=$0; gsub(/[][ \t]/, "", sec); next }
+    want != "" && sec != want { next }
+    { line=$0; sub(/^[ \t]+/, "", line) }
+    index(line, k) == 1 { rest=substr(line, length(k) + 1)
+      if (rest ~ /^[ \t]*=/) { sub(/^[ \t]*=[ \t]*/, "", rest); sub(/[ \t]*#.*$/, "", rest); gsub(/^"|"$/, "", rest); print rest; exit } }' "$1"
+}
+nginx_val() { awk -v k="$2" '{ for (i = 1; i < NF; i++) if ($i == k) { v=$(i + 1); sub(/;.*$/, "", v); n=split(v, a, ":"); print a[n]; exit } }' "$1"; }
+# prints "unitfile|binary|server-or-client|config" for every hstun unit under SYSTEMD_DIR
+adopt_candidates() {
+  local f line bin sub cfg
+  for f in "$SYSTEMD_DIR"/hstun*.service; do
+    [ -f "$f" ] || continue
+    line=$(sed -n 's/^ExecStart=//p' "$f" | head -1)
+    # shellcheck disable=SC2086  # word splitting of the ExecStart line is the point
+    set -- $line
+    bin=${1:-}; sub=${2:-}
+    case "${bin##*/}" in hstun | hstun-*) ;; *) continue ;; esac
+    case "$sub" in server | client) ;; *) continue ;; esac
+    cfg=""; shift 2
+    while [ $# -gt 0 ]; do
+      case "$1" in -config | --config) cfg=${2:-}; shift ;; -config=* | --config=*) cfg=${1#*=} ;; esac
+      shift
+    done
+    [ -n "$cfg" ] && echo "${f##*/}|$bin|$sub|$cfg"
+  done
+}
+# adopt_one UNITFILE BIN SUB CONFIG: runs in a subshell; writes only $ETC/install.conf, never touches units, config, binary or firewall
+adopt_one() {
+  local unitfile=$1 bin=$2 sub=$3 cfg=$4 dir base f nginxu="" reload="" units
+  dir=${cfg%/*}; base=${dir##*/}
+  if [ "${dir%/*}" != "$ETC_BASE" ]; then warn "$unitfile: config $cfg is not under $ETC_BASE/hstun[-NAME]/, skipped"; return 1; fi
+  case "$base" in hstun) NAME="" ;; hstun-*) NAME=${base#hstun-} ;; *) warn "$unitfile: config directory $dir is not hstun or hstun-NAME, skipped"; return 1 ;; esac
+  case "$NAME" in *[!A-Za-z0-9_]*) warn "$unitfile: instance name '$NAME' has unsupported characters, skipped"; return 1 ;; esac
+  case "$sub:${cfg##*/}" in server:server.toml | client:client.toml) ;; *) warn "$unitfile: expected $dir/$sub.toml, found ${cfg##*/}, skipped"; return 1 ;; esac
+  set_paths
+  if [ -f "$ETC/install.conf" ]; then info "$unitfile: already managed ($ETC)"; return 0; fi
+  [ -r "$cfg" ] || { warn "$unitfile: cannot read $cfg (run as root)"; return 1; }
+  [ -x "$bin" ] || { warn "$unitfile: $bin is not executable, skipped"; return 1; }
+  "$bin" check -config "$cfg" -mode "$sub" >/dev/null 2>&1 || { warn "$unitfile: $bin does not accept $cfg, left alone"; return 1; }
+  units=$unitfile
+  if [ "$sub" = server ]; then
+    ROLE="exit"
+    local listen trust
+    listen=$(toml_val "$cfg" listen server); trust=$(toml_val "$cfg" trust_proxy server)
+    case "$trust" in
+      loopback) MODE=nginx; BACKEND_PORT=${listen##*:} ;;
+      cloudflared) MODE=cloudflared; BACKEND_PORT=${listen##*:} ;;
+      *) MODE=direct; PORT=${listen##*:} ;;
+    esac
+    WS_PATH=$(toml_val "$cfg" ws_path server); HTTP_PATH=$(toml_val "$cfg" http_path server)
+    FORWARD_TARGET=$(toml_val "$cfg" target forward)
+    ADMIN_PORT=$(toml_val "$cfg" admin_listen server); ADMIN_PORT=${ADMIN_PORT##*:}
+    DECOY_DIR=$(toml_val "$cfg" decoy_dir server)
+    if [ "$MODE" = direct ] && [ -f "$ETC/cert.pem" ]; then SELF_SIGNED=1; fi
+    if [ "$MODE" = nginx ]; then
+      for f in "$SYSTEMD_DIR"/hstun*.service; do
+        if [ -f "$f" ] && grep -q "^ExecStart=.*$ETC/nginx.conf" "$f"; then nginxu=${f##*/}; fi
+      done
+      if [ -n "$nginxu" ]; then
+        units="$units $nginxu"
+        for f in "$SYSTEMD_DIR"/hstun*.service; do
+          if [ -f "$f" ] && grep -q "systemctl reload $nginxu" "$f"; then reload=${f##*/}; fi
+        done
+        if [ -n "$reload" ]; then
+          units="$units $reload"
+          for f in "${reload%.service}.path" "${reload%.service}.timer"; do
+            if [ -f "$SYSTEMD_DIR/$f" ]; then units="$units $f"; fi
+          done
+        fi
+      fi
+      if [ -r "$ETC/nginx.conf" ]; then
+        PORT=$(nginx_val "$ETC/nginx.conf" listen)
+        DOMAIN=$(nginx_val "$ETC/nginx.conf" server_name)
+        if [ "$DOMAIN" = _ ]; then DOMAIN=""; fi
+      fi
+    fi
+  else
+    ROLE=entry
+    SERVER=$(toml_val "$cfg" server client); CARRIER=$(toml_val "$cfg" carrier client)
+    WS_PATH=$(toml_val "$cfg" ws_path client); HTTP_PATH=$(toml_val "$cfg" http_path client)
+    CONNECT=$(toml_val "$cfg" connect client); SNI=$(toml_val "$cfg" sni client)
+    CONNS=$(toml_val "$cfg" conns client); TLS_VERIFY=$(toml_val "$cfg" tls_verify client)
+    SPKI=$(toml_val "$cfg" spki_sha256 client)
+    FORWARD_LISTEN=$(toml_val "$cfg" listen forward); FORWARD_NAME=$(toml_val "$cfg" name forward)
+    ADMIN_PORT=$(toml_val "$cfg" admin_listen client); ADMIN_PORT=${ADMIN_PORT##*:}
+    if [ "$(toml_val "$cfg" enabled socks)" = true ]; then SOCKS_LISTEN=$(toml_val "$cfg" listen socks); fi
+    CARRIER=${CARRIER:-ws}
+  fi
+  ADOPTED=1; ADOPT_UNITS=$units
+  if [ "$bin" != "$BIN_DIR/hstun" ]; then ADOPT_BIN=$bin; fi
+  if [ "$DRY_RUN" = 1 ]; then
+    info "would adopt $unitfile as instance ${NAME:-default}: role $ROLE${MODE:+, mode $MODE}, binary $bin ($("$bin" version 2>/dev/null || echo ?))"
+    echo "           units: $units"
+    echo "           ports: ${PORT:+public $PORT }${BACKEND_PORT:+backend $BACKEND_PORT }${ADMIN_PORT:+admin $ADMIN_PORT}${FORWARD_LISTEN:+ forward $FORWARD_LISTEN}${FORWARD_TARGET:+ -> $FORWARD_TARGET}"
+    return 0
+  fi
+  save_conf
+  info "adopted $unitfile as instance ${NAME:-default}: role $ROLE${MODE:+, mode $MODE}, $("$bin" version 2>/dev/null || echo "$bin"), units: $units"
+}
+ensure_ctl() { # hstun-ctl on PATH without touching the hstun binary the live units run
+  [ -x "$BIN_DIR/hstun-ctl" ] && return 0
+  install -d "$BIN_DIR"
+  if [ -f "$0" ] && [ -r "$0" ] && [ "${0#/dev/}" = "$0" ]; then install -m 0755 "$0" "$BIN_DIR/hstun-ctl"
+  else fetch_release; install -m 0755 "$STAGE/share/install.sh" "$BIN_DIR/hstun-ctl"; fi
+  info "installed $BIN_DIR/hstun-ctl (the hstun binaries your units run were not touched)"
+}
+cmd_adopt() {
+  need_root
+  local cands unitfile bin sub cfg n=0 bad=0
+  cands=$(adopt_candidates)
+  [ -n "$cands" ] || die "no hstun systemd units (ExecStart ... hstun server|client -config FILE) found in $SYSTEMD_DIR"
+  while IFS='|' read -r unitfile bin sub cfg; do
+    if [ -n "$ADOPT_ONLY" ] && [ "$ADOPT_ONLY" != "$unitfile" ] && [ "$ADOPT_ONLY.service" != "$unitfile" ]; then continue; fi
+    n=$((n + 1))
+    if ! ( reset_conf; adopt_one "$unitfile" "$bin" "$sub" "$cfg" ); then bad=$((bad + 1)); fi
+  done <<<"$cands"
+  [ "$n" -gt 0 ] || die "no hstun unit named $ADOPT_ONLY"
+  if [ "$DRY_RUN" = 1 ]; then info "dry run: nothing was written"; return 0; fi
+  ensure_ctl
+  [ "$bad" = 0 ] || warn "$bad unit(s) could not be adopted (see above); they keep running untouched"
+  info "next: hstun-ctl status | logs | restart | update (checks every config with the new binary first, keeps .prev copies)"
+}
+cmd_forget() { # stop managing an adopted instance; units, config and binary stay exactly as they are
+  need_root; set_paths; need_installed
+  [ -n "$ADOPTED" ] || die "forget is only for adopted instances; use uninstall for this one"
+  confirm "Stop managing ${NAME:-default} with hstun-ctl (it keeps running as it is)?" n || { info "nothing changed"; return 0; }
+  rm -f "${ETC:?}/install.conf"
+  info "forgot ${NAME:-default}"
+}
+
 cmd_version() { echo "hstun-ctl $INSTALLER_VERSION; binary: $("$BIN_DIR/hstun" version 2>/dev/null || echo not installed)"; }
 
 menu() {
@@ -919,6 +1098,7 @@ menu() {
     echo "  5) Show join string (exit)"
     echo "  6) Logs"
     echo "  7) Uninstall"
+    echo "  8) Adopt hand-installed hstun units (manage them with hstun-ctl)"
     echo "  0) Quit"
     local c=""; read -r -p "Choose: " c <"$TTY" || exit 0
     case "$c" in
@@ -929,6 +1109,7 @@ menu() {
       5) cmd_show_join ;;
       6) cmd_logs ;;
       7) cmd_uninstall ;;
+      8) cmd_adopt ;;
       0 | q | "") exit 0 ;;
     esac
   done
@@ -941,7 +1122,8 @@ hstun installer/manager $INSTALLER_VERSION
   install.sh                          menu
   install.sh exit  [flags]            install the server side
   install.sh entry [flags]            install the client side
-  hstun-ctl status|logs|restart|update|show-join|show-secret|uninstall|version   (installed by the first run)
+  install.sh adopt [--dry-run] [--unit U]   register hand-installed hstun units (writes one small file per instance, changes nothing else)
+  hstun-ctl status|logs|restart|update|show-join|show-secret|uninstall|forget|version   (installed by the first run)
 
 Common:    --name NAME   --yes   --version X.Y.Z   --repo OWNER/REPO   --no-firewall
 Exit:      --mode nginx|direct|cloudflared   --forward-target HOST:PORT   --port N   --domain D
@@ -950,7 +1132,7 @@ Entry:     --join STRING   --server HOST:PORT   --carrier ws|http|chunk   --ws-p
            --secret-file FILE | --secret-from USER@HOST[:SSHPORT]   --tls-verify system|spki   --spki HEX
            --connect IP:PORT   --sni NAME   --forward-listen ADDR:PORT   --forward-name NAME   --conns N
            --chunk-parallel N   --socks ADDR:PORT
-Manage:    --purge (uninstall)   --all (update)   -f (logs)
+Manage:    --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)
 
 Environment: GITHUB_TOKEN (private repository), HSTUN_REPO, HSTUN_VERSION, HSTUN_TARBALL=FILE (offline), HSTUN_BUILD=1 (build from source).
 EOF
@@ -960,7 +1142,7 @@ EOF
 CMD=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    exit | entry | status | logs | restart | update | show-join | show-secret | uninstall | version | menu | help) CMD=$1 ;;
+    exit | entry | status | logs | restart | update | show-join | show-secret | uninstall | adopt | forget | version | menu | help) CMD=$1 ;;
     install) ;;
     --name) NAME=$2; shift ;;
     --yes | -y) YES=1 ;;
@@ -997,6 +1179,8 @@ while [ $# -gt 0 ]; do
     --socks) SOCKS_LISTEN=$2; shift ;;
     --purge) PURGE=1 ;;
     --all) ALL=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --unit) ADOPT_ONLY=$2; shift ;;
     -f) FOLLOW=1 ;;
     -h | --help) CMD=help ;;
     *) die "unknown argument: $1 (see: install.sh help)" ;;
@@ -1016,6 +1200,8 @@ case "$CMD" in
   show-join) cmd_show_join ;;
   show-secret) cmd_show_secret ;;
   uninstall) cmd_uninstall ;;
+  adopt) cmd_adopt ;;
+  forget) cmd_forget ;;
   version) cmd_version ;;
   help) usage ;;
   menu | "") if [ -n "$TTY" ]; then menu; else usage; fi ;;

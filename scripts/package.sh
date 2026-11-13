@@ -21,6 +21,12 @@ for arch in amd64 arm64; do
   cp install.sh "$stage/share/install.sh"
   cp -r deploy "$stage/share/deploy"
   cp -r deploy/decoy-example "$stage/share/decoy-example"
+  # licenses travel with the binary (AGPL-3.0 for hstun, notices and license texts of the vendored libraries)
+  mkdir -p "$stage/share/licenses"
+  cp LICENSE THIRD_PARTY_NOTICES.md "$stage/share/licenses/"
+  cp vendor/github.com/BurntSushi/toml/COPYING "$stage/share/licenses/BurntSushi-toml.COPYING"
+  cp vendor/github.com/coder/websocket/LICENSE.txt "$stage/share/licenses/coder-websocket.LICENSE"
+  cp vendor/github.com/hashicorp/yamux/LICENSE "$stage/share/licenses/hashicorp-yamux.LICENSE"
   echo "$VERSION" > "$stage/VERSION"
   tar -C "$stage" --owner=0 --group=0 -czf "dist/hstun_${VERSION}_linux_${arch}.tar.gz" hstun share VERSION
   rm -rf "$stage"
