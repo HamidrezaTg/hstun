@@ -4,7 +4,7 @@
 role        = "entry"
 server      = "exit.example.org:23456"   # the exit listener
 connect     = ""                         # optional ip:port to dial instead (keeps the name for SNI)
-carrier     = "ws"                       # ws | http
+carrier     = "ws"                       # ws | http | chunk
 ws_path     = "/hs/ws"                   # must match the exit; CHANGE from the public default
 # user_agent  = ""                       # empty = a common browser string
 conns       = 2                          # 2 measured as fast as 4 on a real path and looks less uniform
