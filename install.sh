@@ -15,7 +15,7 @@
 # so it runs unattended with --yes. See README.md ("Install").
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.3.0"
+INSTALLER_VERSION="0.3.1"
 REPO="${HSTUN_REPO:-HamidrezaTg/hstun}"
 WANT_VERSION="${HSTUN_VERSION:-}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
@@ -209,7 +209,7 @@ NAME=""
 ROLE="" MODE="" FORWARD_TARGET="" PORT="" DOMAIN="" CERT="" KEY="" ACME="" EMAIL="" ALLOW_FROM="" DECOY_DIR="" BACKEND_PORT=""
 JOIN="" JOIN_SECRET="" NO_SECRET=0 SERVER="" CARRIER="" WS_PATH="" HTTP_PATH="" SECRET_FILE="" SECRET_FROM="" TLS_VERIFY="" SPKI="" CONNECT="" SNI=""
 FORWARD_LISTEN="" FORWARD_NAME="" CONNS="" CHUNK_PARALLEL="" SOCKS_LISTEN="" NO_FW="" ADMIN_PORT="" SELF_SIGNED="" PUBLIC_ADDR=""
-FOLLOW=0 PURGE=0 ALL=0 FORCE=0 RECONFIGURE=0 REINSTALL=0 NEW_CERT=0 CUSTOMIZE=0 SKIP_LOAD="" DRY_RUN=0 ADOPT_ONLY=""
+FOLLOW=0 PURGE=0 ALL=0 EDIT_MODE=0 FILE="" FILE_TEST=0 FORCE=0 RECONFIGURE=0 REINSTALL=0 NEW_CERT=0 CUSTOMIZE=0 SKIP_LOAD="" DRY_RUN=0 ADOPT_ONLY=""
 ADOPTED="" ADOPT_UNITS="" ADOPT_BIN=""
 
 set_paths() {
@@ -256,11 +256,15 @@ existing_prompt() {
     else printf 'entry, %s via %s, listens on %s' "$SERVER" "${CARRIER:-ws}" "$FORWARD_LISTEN"; fi) )
   info "instance ${NAME:-default} is already installed: $sum"
   if [ "$REINSTALL" = 1 ]; then reinstall_wipe; return 0; fi
-  if [ "$RECONFIGURE" = 1 ] || [ "$YES" = 1 ] || [ -z "$TTY" ]; then return 0; fi
-  echo "  1) Keep it as it is (nothing changes)"
-  echo "  2) Change settings (the certificate, secret and paths are kept, so paired entries keep working)"
-  echo "  3) Reinstall from scratch (new certificate, secret and paths: every entry must be paired again)"
-  c=""; ask c "Choose" 1
+  if [ "$RECONFIGURE" = 1 ] && { [ "$EDIT_MODE" != 1 ] || [ "$YES" = 1 ] || [ -z "$TTY" ]; }; then return 0; fi
+  if [ "$YES" = 1 ] || [ -z "$TTY" ]; then return 0; fi
+  if [ "$EDIT_MODE" = 1 ]; then c=2
+  else
+    echo "  1) Keep it as it is (nothing changes)"
+    echo "  2) Change settings (the certificate, secret and paths are kept, so paired entries keep working)"
+    echo "  3) Reinstall from scratch (new certificate, secret and paths: every entry must be paired again)"
+    c=""; ask c "Choose" 1
+  fi
   case "$c" in
     1) info "nothing changed"; return 1 ;;
     2) for k in MODE FORWARD_TARGET PORT DOMAIN ALLOW_FROM SERVER CARRIER FORWARD_LISTEN FORWARD_NAME CONNECT SNI; do
@@ -994,16 +998,29 @@ cmd_update() {
   else dirs=("$ETC"); fi
   for d in "${dirs[@]}"; do ( reset_conf; NAME=${d##*/hstun}; NAME=${NAME#-}; set_paths; load_conf; preflight_conf ); done
   install_files
+  local failed=0 rc
   for d in "${dirs[@]}"; do
+    set +e
     (
+      set -e
       reset_conf; NAME=${d##*/hstun}; NAME=${NAME#-}; set_paths; load_conf
       if [ -n "$ADOPT_BIN" ] && [ "$ADOPT_BIN" != "$BIN_DIR/hstun" ]; then
         if [ -x "$ADOPT_BIN" ] && ! cmp -s "$ADOPT_BIN" "$BIN_DIR/hstun"; then cp -p "$ADOPT_BIN" "$ADOPT_BIN.prev"; fi
         install -m 0755 "$BIN_DIR/hstun" "$ADOPT_BIN"
       fi
       for u in $(daemon_units); do sysd restart "$u"; done
+      if ! health_ok; then
+        warn "instance ${NAME:-default} did not come back healthy with the new binary: going back to the previous one"
+        [ -f "$BIN_DIR/hstun.prev" ] && cp -p "$BIN_DIR/hstun.prev" "$BIN_DIR/hstun"
+        [ -n "$ADOPT_BIN" ] && [ -f "$ADOPT_BIN.prev" ] && cp -p "$ADOPT_BIN.prev" "$ADOPT_BIN"
+        for u in $(daemon_units); do sysd restart "$u"; done
+        exit 1
+      fi
     )
+    rc=$?; set -e
+    [ "$rc" = 0 ] || failed=1
   done
+  [ "$failed" = 0 ] || die "the update was rolled back for at least one instance; the previous version is running again (see the warning above and: hstun-ctl logs)"
   [ "$ALL" = 1 ] || info "restarted this instance only; other instances keep running the old binary until restarted (hstun-ctl update --all)"
   info "updated: $before -> $("$(inst_bin)" version)   (previous binary kept as $(inst_bin).prev)"
 }
@@ -1177,6 +1194,220 @@ cmd_forget() { # stop managing an adopted instance; units, config and binary sta
   info "forgot ${NAME:-default}"
 }
 
+# ---------- health, test, doctor ----------
+listening() { ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q .; }
+sessions_of() { # admin port: number of live sessions, empty when the admin page does not answer
+  local a; a=$(curl -s -m 2 "http://127.0.0.1:$1/stats" 2>/dev/null || true)
+  [ -n "$a" ] && printf '%s' "$a" | grep -o '"carrier"' | wc -l
+  return 0
+}
+# health_ok: the loaded instance is running and, within 25 seconds, ready (entry: a session is up; exit: its port listens)
+health_ok() {
+  if [ "$TEST" = 1 ] || ! have_systemd; then [ "${HSTUN_TEST_HEALTH:-ok}" = ok ]; return; fi
+  local i u n
+  for i in $(seq 1 25); do
+    u=$(daemon_units | head -1)
+    if [ -n "$u" ] && systemctl is-active --quiet "$u"; then
+      if [ "$ROLE" = entry ]; then
+        n=$(sessions_of "$ADMIN_PORT"); [ "${n:-0}" -ge 1 ] && return 0
+      else
+        listening "${PORT:-$BACKEND_PORT}" && return 0
+      fi
+    fi
+    [ "$i" -lt 25 ] && sleep 1
+  done
+  return 1
+}
+CHK_FAIL=0
+chk() { # ok|fail|warn LABEL [DETAIL]
+  local d=""; [ -n "${3:-}" ] && d="  ($3)"
+  case "$1" in
+    ok) printf '  %s[ ok ]%s  %s%s\n' "$G" "$N" "$2" "$d" ;;
+    warn) printf '  %s[warn]%s  %s%s\n' "$Y" "$N" "$2" "$d" ;;
+    *) printf '  %s[FAIL]%s  %s%s\n' "$R" "$N" "$2" "$d"; CHK_FAIL=1 ;;
+  esac
+}
+tcp_ok() { # host port [seconds]
+  (exec 7<>"/dev/tcp/$1/$2") 2>/dev/null &
+  local pid=$! i
+  for i in $(seq 1 "${3:-5}"); do kill -0 "$pid" 2>/dev/null || { wait "$pid"; return; }; sleep 1; done
+  kill "$pid" 2>/dev/null; return 1
+}
+cmd_test() { # end-to-end check of one instance: unit, sessions, and a stream through to the exit's target
+  set_paths; need_installed
+  CHK_FAIL=0
+  echo "Testing instance ${NAME:-default} ($ROLE)"
+  local u n
+  u=$(daemon_units | head -1)
+  if [ "$TEST" != 1 ] && have_systemd; then
+    if systemctl is-active --quiet "$u" 2>/dev/null; then chk ok "service $u is running"; else chk fail "service $u is not running" "hstun-ctl logs"; fi
+  fi
+  if [ -n "$ADMIN_PORT" ]; then
+    n=$(sessions_of "$ADMIN_PORT")
+    if [ "${n:-0}" -ge 1 ]; then chk ok "$n tunnel session(s) up"
+    elif [ "$ROLE" = entry ]; then chk fail "no tunnel session" "the exit is unreachable or the secret/paths differ: hstun-ctl logs"
+    else chk warn "no entry is connected yet"; fi
+  fi
+  if [ "$ROLE" = entry ]; then
+    local h=${FORWARD_LISTEN%:*} p=${FORWARD_LISTEN##*:} line
+    case "$h" in 0.0.0.0 | "" | "[::]") h=127.0.0.1 ;; esac
+    if (exec 7<>"/dev/tcp/$h/$p") 2>/dev/null; then
+      # a stream through the tunnel: if the exit cannot reach its target it closes the stream at once
+      exec 7<>"/dev/tcp/$h/$p"
+      if read -r -t 2 -u 7 line; then chk ok "a stream through the tunnel was answered by the exit's target"
+      elif [ "$?" -gt 128 ]; then chk ok "a stream through the tunnel stayed open (the exit's target accepted it)"
+      else chk fail "the exit closed the stream at once" "nothing listens on the exit's forward target? check the proxy on the exit host"; fi
+      exec 7<&-
+    else chk fail "nothing listens on $FORWARD_LISTEN on this host" "hstun-ctl restart"; fi
+  else
+    local t=$FORWARD_TARGET
+    if tcp_ok "${t%:*}" "${t##*:}" 3; then chk ok "forward target $t accepts connections"; else chk fail "forward target $t does not accept connections" "start your proxy (for example the VLESS inbound) there"; fi
+    if [ -n "${PORT:-$BACKEND_PORT}" ] && { [ "$TEST" = 1 ] || listening "${PORT:-$BACKEND_PORT}"; }; then chk ok "port ${PORT:-$BACKEND_PORT} is listening"; else chk fail "port ${PORT:-$BACKEND_PORT} is not listening" "hstun-ctl logs"; fi
+  fi
+  [ "$CHK_FAIL" = 0 ] && info "test passed" || { warn "test found problems"; return 1; }
+}
+cmd_doctor() { # read-only checks of this host and one instance
+  set_paths; need_installed
+  CHK_FAIL=0
+  echo "Checking instance ${NAME:-default} ($ROLE) on $(hostname -s 2>/dev/null)"
+  local v
+  v=$("$(inst_bin)" version 2>/dev/null) && chk ok "binary $v" || chk fail "binary $(inst_bin) does not run"
+  local m=server; [ "$ROLE" = entry ] && m=client
+  if "$(inst_bin)" check -config "$ETC/$m.toml" -mode "$m" >/dev/null 2>&1; then chk ok "configuration $ETC/$m.toml is valid"; else chk fail "configuration $ETC/$m.toml is rejected" "$(inst_bin) check -config $ETC/$m.toml"; fi
+  if [ "$TEST" != 1 ] && have_systemd; then
+    local u
+    for u in $(service_units); do
+      if systemctl is-enabled --quiet "$u" 2>/dev/null; then chk ok "$u starts at boot"; else chk warn "$u does not start at boot" "systemctl enable $u"; fi
+    done
+    if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo yes)" = yes ]; then chk ok "clock is synchronised"; else chk warn "clock is not synchronised" "TLS and handshakes need a correct time"; fi
+  fi
+  local free; free=$(df -Pk "$ETC_BASE" 2>/dev/null | awk 'NR==2{print int($4/1024)}')
+  if [ "${free:-1000}" -ge 100 ]; then chk ok "disk space (${free:-?} MB free)"; else chk warn "little disk space (${free} MB free)"; fi
+  if [ "$ROLE" = exit ]; then
+    local port=${PORT:-$BACKEND_PORT}
+    if [ "$MODE" = nginx ] && [ -r "$ETC/nginx.conf" ] && have nginx; then
+      if nginx -t -c "$ETC/nginx.conf" >/dev/null 2>&1; then chk ok "nginx configuration is valid"; else chk fail "nginx configuration is rejected" "nginx -t -c $ETC/nginx.conf"; fi
+    fi
+    local cert=$ETC/cert.pem; [ "$MODE" = nginx ] && cert=${CERT:-}
+    if [ -n "$cert" ] && [ -r "$cert" ]; then
+      if openssl x509 -in "$cert" -noout -checkend $((14 * 86400)) >/dev/null 2>&1; then chk ok "certificate is valid for more than 14 days"
+      elif openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1; then chk warn "certificate expires within 14 days" "$cert"
+      else chk fail "certificate has expired" "$cert"; fi
+    fi
+    if [ -n "$DOMAIN" ]; then
+      local ip mine; ip=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1; exit}')
+      mine=$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ')
+      if [ -z "$ip" ]; then chk fail "$DOMAIN does not resolve" "create the DNS record"
+      elif [[ " $mine " == *" $ip "* ]]; then chk ok "$DOMAIN resolves to this host ($ip)"
+      else chk warn "$DOMAIN resolves to $ip, not to an address of this host" "fine behind NAT or a CDN, otherwise fix the DNS record"; fi
+    fi
+    if [ "$TEST" != 1 ] && ufw_active && [ "$MODE" != cloudflared ]; then
+      if ufw status | grep -qE "^$port(/tcp)?[[:space:]]"; then chk ok "ufw allows port $port"; else chk warn "no ufw rule for port $port" "ufw allow $port/tcp"; fi
+    fi
+  else
+    local sh=${SERVER%:*} sp=${SERVER##*:}
+    if [ "$TEST" != 1 ]; then
+      if getent hosts "$sh" >/dev/null 2>&1 || [[ "$sh" =~ ^[0-9.]+$ ]]; then chk ok "exit address $sh resolves"; else chk fail "exit address $sh does not resolve"; fi
+      local tgt=${CONNECT:-$sh:$sp}
+      if tcp_ok "${tgt%:*}" "${tgt##*:}" 5; then chk ok "TCP connection to the exit ($tgt) works"; else chk fail "cannot open a TCP connection to the exit ($tgt)" "firewall or blocked route; try --carrier chunk through a CDN"; fi
+    fi
+  fi
+  cmd_test || CHK_FAIL=1
+  [ "$CHK_FAIL" = 0 ] && info "no problems found" || { warn "problems found (see [FAIL] lines)"; return 1; }
+}
+
+# ---------- snapshots: settings changes and updates that undo themselves ----------
+snapshot_instance() { # DIR
+  tar -C "$ETC_BASE" -cf "$1/etc.tar" "${ETC##*/}"
+  local u; for u in $(units_of_instance); do cp -p "$SYSTEMD_DIR/$u" "$1/" 2>/dev/null || true; done
+}
+restore_instance() { # DIR
+  rm -rf "${ETC:?}"; tar -C "$ETC_BASE" -xf "$1/etc.tar"
+  local f; for f in "$1"/*.service "$1"/*.path "$1"/*.timer; do [ -f "$f" ] && cp -p "$f" "$SYSTEMD_DIR/"; done
+  sysd daemon-reload
+  local u; for u in $(service_units); do sysd restart "$u"; done
+}
+cmd_edit() { # change an installed instance; undone automatically when it does not come back healthy
+  need_root; set_paths
+  [ -f "$ETC/install.conf" ] || die "no hstun instance${NAME:+ named $NAME} found in $ETC (install it first)"
+  local role snap rc=0
+  role=$(sed -n 's/^ROLE=//p' "$ETC/install.conf" | head -1)
+  snap=$(mktemp -d)
+  ( reset_conf; load_conf; snapshot_instance "$snap" ) # flags given on the command line must survive, so load only inside the subshell
+  EDIT_MODE=1; RECONFIGURE=1
+  set +e; ( set -e; if [ "$role" = exit ]; then install_exit; else install_entry; fi ); rc=$?; set -e
+  if [ "$rc" = 0 ] && ( reset_conf; set_paths; load_conf; health_ok ); then
+    info "settings applied and the tunnel is healthy"; rm -rf "${snap:?}"; return 0
+  fi
+  warn "the change did not work (exit code $rc or the tunnel did not come back): restoring the previous settings"
+  ( reset_conf; set_paths; load_conf; restore_instance "$snap" )
+  rm -rf "${snap:?}"
+  die "previous settings restored. Firewall rules opened for the new settings (if any) were not closed."
+}
+cmd_rollback() { # put the previous binary back (the .prev copy every update leaves)
+  need_root; set_paths; need_installed
+  local b; b=$(inst_bin)
+  [ -f "$b.prev" ] || die "no previous binary ($b.prev) to go back to"
+  confirm "Go back from $("$b" version 2>/dev/null) to $("$b.prev" version 2>/dev/null)?" n || { info "nothing changed"; return 0; }
+  cp -p "$b" "$b.next"; cp -p "$b.prev" "$b"; mv "$b.next" "$b.prev"
+  local u; for u in $(daemon_units); do sysd restart "$u"; done
+  info "rolled back to $("$b" version 2>/dev/null) (the newer one is kept as $b.prev, run rollback again to return)"
+}
+
+# ---------- backup and restore ----------
+cmd_backup() { # every managed instance: configuration, secrets, certificates, units
+  need_root
+  local out=${FILE:-hstun-backup-$(date +%Y%m%d-%H%M).tar.gz} stage d n=0
+  stage=$(mktemp -d); mkdir -p "$stage/etc" "$stage/systemd"
+  for d in "$ETC_BASE"/hstun "$ETC_BASE"/hstun-*; do
+    [ -f "$d/install.conf" ] || continue
+    cp -a "$d" "$stage/etc/"; n=$((n + 1))
+    ( reset_conf; NAME=$(name_of "$d"); set_paths; load_conf; for u in $(units_of_instance); do cp -p "$SYSTEMD_DIR/$u" "$stage/systemd/" 2>/dev/null || true; done )
+  done
+  [ "$n" -gt 0 ] || { rm -rf "${stage:?}"; die "no managed instances to back up"; }
+  echo "$INSTALLER_VERSION" >"$stage/VERSION"
+  ( umask 077; tar -czf "$out" -C "$stage" etc systemd VERSION )
+  rm -rf "${stage:?}"
+  info "backup written: $out ($n instance(s)). It contains secrets and private keys: keep it private."
+}
+cmd_restore() { # FILE [--test]: --test only reads and reports
+  need_root
+  [ -n "$FILE" ] && [ -f "$FILE" ] || die "usage: hstun-ctl restore FILE [--test]"
+  local stage d name role mode bad=0
+  stage=$(mktemp -d)
+  tar -tzf "$FILE" >/dev/null 2>&1 || { rm -rf "${stage:?}"; die "$FILE is not a readable backup"; }
+  tar --same-owner -xzf "$FILE" -C "$stage" || { rm -rf "${stage:?}"; die "could not read $FILE"; }
+  [ -d "$stage/etc" ] || { rm -rf "${stage:?}"; die "$FILE is not an hstun backup"; }
+  echo "Backup made by hstun-ctl $(cat "$stage/VERSION" 2>/dev/null || echo '?'):"
+  for d in "$stage"/etc/hstun*; do
+    [ -f "$d/install.conf" ] || continue
+    name=$(name_of "$d")
+    role=$(sed -n 's/^ROLE=//p' "$d/install.conf" | head -1); mode=$(sed -n 's/^MODE=//p' "$d/install.conf" | head -1)
+    printf '  instance %-10s %s%s' "${name:-default}" "$role" "${mode:+, mode $mode}"
+    if [ -s "$d/secret" ] && [ -f "$d/$([ "$role" = exit ] && echo server || echo client).toml" ]; then echo "   (configuration and secret present)"; else echo "   ${R}(incomplete: configuration or secret missing)${N}"; bad=1; fi
+    [ -d "$ETC_BASE/${d##*/}" ] && echo "           exists on this host and would be overwritten"
+  done
+  if [ "$bad" = 1 ]; then rm -rf "${stage:?}"; die "the backup is incomplete"; fi
+  if [ "$FILE_TEST" = 1 ]; then rm -rf "${stage:?}"; info "test only: nothing was changed"; return 0; fi
+  confirm "Restore these instances now? Existing ones with the same names are overwritten." n || { rm -rf "${stage:?}"; info "nothing changed"; return 0; }
+  [ -x "$BIN_DIR/hstun" ] || { fetch_release; install_files; }
+  ensure_user_account
+  for d in "$stage"/etc/hstun*; do
+    [ -f "$d/install.conf" ] || continue
+    ( reset_conf; NAME=$(name_of "$d"); set_paths; load_conf
+      for u in $(service_units); do sysd stop "$u" || true; done
+      rm -rf "${ETC:?}"; cp -a "$d" "$ETC_BASE/" )
+  done
+  for f in "$stage"/systemd/*; do [ -f "$f" ] && cp -p "$f" "$SYSTEMD_DIR/"; done
+  sysd daemon-reload
+  for d in "$stage"/etc/hstun*; do
+    [ -f "$d/install.conf" ] || continue
+    ( reset_conf; NAME=$(name_of "$d"); set_paths; load_conf; for u in $(units_of_instance); do case "$u" in *.path | *.timer) sysd enable --now "$u" >/dev/null 2>&1 || true ;; *) sysd enable --now "$u" >/dev/null 2>&1 || sysd restart "$u" ;; esac; done )
+  done
+  rm -rf "${stage:?}"
+  info "restored. Firewall rules are not part of a backup: check them with hstun-ctl doctor."
+}
+
 cmd_version() { echo "hstun-ctl $INSTALLER_VERSION; binary: $("$BIN_DIR/hstun" version 2>/dev/null || echo not installed)"; }
 
 # ---------- menu ----------
@@ -1250,6 +1481,11 @@ pick_instance() { # [role]: sets NAME to the instance to act on (asks when there
 act_status() { local d; while IFS= read -r d; do reset_conf; NAME=$(name_of "$d"); set_paths; cmd_status; echo; done < <(list_instances); }
 act_pair() { pick_instance exit && { need_installed; echo "Send this one command to the entry host. It contains the secret, so use a private channel:"; echo; echo "  hstun-ctl entry --join '$(make_join secret)'"; }; }
 act_logs() { pick_instance && { FOLLOW=1; echo "Live log. Press Ctrl+C to return to the menu."; cmd_logs; }; }
+act_test() { pick_instance && cmd_test; }
+act_doctor() { pick_instance && cmd_doctor; }
+act_edit() { pick_instance && cmd_edit; }
+act_rollback() { pick_instance && cmd_rollback; }
+act_restore() { local f=""; ask f "Backup file" ""; FILE=$f; if confirm "Only check the backup, change nothing?" y; then FILE_TEST=1; fi; cmd_restore; }
 act_restart() { pick_instance && cmd_restart; }
 act_update() { local n; n=$(list_instances | wc -l); [ "$n" -gt 1 ] && ALL=1; pick_instance || return 0; cmd_update; }
 act_uninstall() { pick_instance || return 0; confirm "Also delete its configuration, secret and certificate?" n && PURGE=1; cmd_uninstall; }
@@ -1280,12 +1516,18 @@ menu() {
       while IFS= read -r d; do instance_line "$d"; done <<<"$insts"
       echo
       labels+=("Status"); actions+=(act_status); hints+=("units, versions, sessions")
+      labels+=("Test the tunnel"); actions+=(act_test); hints+=("end-to-end check: is traffic really passing?")
+      labels+=("Check for problems"); actions+=(act_doctor); hints+=("ports, firewall, certificate, DNS, clock, configuration")
       if have_role exit; then
         labels+=("Show the pair code"); actions+=(act_pair); hints+=("the one command that connects an entry to this exit")
       fi
       labels+=("Live log"); actions+=(act_logs); hints+=("follow the journal, Ctrl+C returns here")
+      labels+=("Settings"); actions+=(act_edit); hints+=("change port, domain, target...; undone automatically if it breaks")
       labels+=("Restart"); actions+=(act_restart); hints+=("restart the tunnel service")
       labels+=("Update"); actions+=(act_update); hints+=("latest release; nothing happens when you are current")
+      labels+=("Roll back the last update"); actions+=(act_rollback); hints+=("go back to the previous binary")
+      labels+=("Backup"); actions+=(cmd_backup); hints+=("one private archive with settings, secrets and certificates")
+      labels+=("Restore a backup"); actions+=(act_restore); hints+=("check a backup first, then restore it")
       labels+=("Install another instance"); actions+=(act_install_more); hints+=("a second exit or entry on this host")
       labels+=("Uninstall"); actions+=(act_uninstall); hints+=("remove an instance (you can keep its settings)")
     else
@@ -1315,7 +1557,10 @@ hstun installer/manager $INSTALLER_VERSION
   install.sh exit  [flags]            install the server side
   install.sh entry [flags]            install the client side
   install.sh adopt [--dry-run] [--unit U]   register hand-installed hstun units (writes one small file per instance, changes nothing else)
-  hstun-ctl status|logs|restart|update|show-join|show-secret|uninstall|forget|version   (installed by the first run)
+  hstun-ctl status|test|doctor|logs|restart|edit|update|rollback|show-join|show-secret|backup|restore|uninstall|forget|version   (installed by the first run)
+    test       end-to-end check of the tunnel         doctor   checks of this host, certificate, DNS, firewall, then test
+    edit       change settings, undone if the tunnel does not come back
+    rollback   go back to the previous binary          backup FILE / restore FILE [--test]   all instances in one private archive
 
 Common:    --name NAME   --yes   --version X.Y.Z   --repo OWNER/REPO   --no-firewall
 Exit:      --mode nginx|direct|cloudflared   --forward-target HOST:PORT   --port N   --domain D
@@ -1325,7 +1570,7 @@ Entry:     --join STRING   --server HOST:PORT   --carrier ws|http|chunk   --ws-p
            --connect IP:PORT   --sni NAME   --forward-listen ADDR:PORT   --forward-name NAME   --conns N
            --chunk-parallel N   --socks ADDR:PORT
 Install:   --reconfigure (change an installed instance)   --reinstall (new certificate, secret, paths)   --new-cert   --customize (entry: ask the advanced questions)
-Manage:    --force (update even when current)   --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)   --no-secret (show-join)
+Manage:    --force (update even when current)   --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)   --file FILE, --test (backup/restore)   --no-secret (show-join)
 
 Environment: GITHUB_TOKEN (private repository), HSTUN_REPO, HSTUN_VERSION, HSTUN_TARBALL=FILE (offline), HSTUN_BUILD=1 (build from source).
 EOF
@@ -1335,7 +1580,7 @@ EOF
 CMD=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    exit | entry | status | logs | restart | update | show-join | show-secret | uninstall | adopt | forget | version | menu | help) CMD=$1 ;;
+    exit | entry | status | logs | restart | update | show-join | show-secret | uninstall | adopt | forget | test | doctor | edit | rollback | backup | restore | version | menu | help) CMD=$1 ;;
     install) ;;
     --name) NAME=$2; shift ;;
     --yes | -y) YES=1 ;;
@@ -1372,6 +1617,8 @@ while [ $# -gt 0 ]; do
     --socks) SOCKS_LISTEN=$2; shift ;;
     --purge) PURGE=1 ;;
     --force) FORCE=1 ;;
+    --test) FILE_TEST=1 ;;
+    --file) FILE=$2; shift ;;
     --reconfigure) RECONFIGURE=1 ;;
     --reinstall) REINSTALL=1 ;;
     --new-cert) NEW_CERT=1 ;;
@@ -1382,7 +1629,7 @@ while [ $# -gt 0 ]; do
     --unit) ADOPT_ONLY=$2; shift ;;
     -f) FOLLOW=1 ;;
     -h | --help) CMD=help ;;
-    *) die "unknown argument: $1 (see: install.sh help)" ;;
+    *) if { [ "$CMD" = backup ] || [ "$CMD" = restore ]; } && [ -z "$FILE" ]; then FILE=$1; else die "unknown argument: $1 (see: install.sh help)"; fi ;;
   esac
   shift
 done
@@ -1401,6 +1648,12 @@ case "$CMD" in
   uninstall) cmd_uninstall ;;
   adopt) cmd_adopt ;;
   forget) cmd_forget ;;
+  test) cmd_test ;;
+  doctor) cmd_doctor ;;
+  edit) cmd_edit ;;
+  rollback) cmd_rollback ;;
+  backup) cmd_backup ;;
+  restore) cmd_restore ;;
   version) cmd_version ;;
   help) usage ;;
   menu | "") if [ -n "$TTY" ]; then menu; else usage; fi ;;

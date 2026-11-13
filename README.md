@@ -4,7 +4,7 @@ Carries TCP over an ordinary HTTPS connection. Everything rides authenticated,
 end-to-end encrypted, multiplexed sessions, so a handful of TLS connections
 carry any number of TCP streams. It runs in two modes (see "Modes").
 
-Status: v0.3.0, pre-release, not independently reviewed. Tested with the race detector, a wedge test,
+Status: v0.3.1, pre-release, not independently reviewed. Tested with the race detector, a wedge test,
 resets, added latency and a TLS-terminating tap; both modes were also run across real networks and
 inspected with packet captures (payload never appeared in clear). The direct mode has also run
 behind nginx on a real path, with TLS resumption seen on the wire, crash recovery and the black-box
@@ -137,7 +137,7 @@ leaves ufw rules and certificates, which `hstun-ctl` did not create.
 
 - Offline: copy `hstun_VERSION_linux_ARCH.tar.gz` and run with `HSTUN_TARBALL=/path/to/it`.
 - From source: `HSTUN_BUILD=1 hstun-ctl update` (or on the first run). It downloads the source, fetches Go if needed and builds with the vendored dependencies.
-- Pin a version: `--version 0.3.0` (or `HSTUN_VERSION`). Another repository (a fork): `--repo OWNER/hstun` (or `HSTUN_REPO`).
+- Pin a version: `--version 0.3.1` (or `HSTUN_VERSION`). Another repository (a fork): `--repo OWNER/hstun` (or `HSTUN_REPO`).
 - Maintainers: `scripts/package.sh` builds `dist/hstun_VERSION_linux_{amd64,arm64}.tar.gz` and `SHA256SUMS`;
   publish with `gh release create vVERSION dist/hstun_*.tar.gz dist/SHA256SUMS --repo OWNER/hstun`. The installer verifies the checksum.
 
