@@ -65,6 +65,41 @@ while len(got) < n:
 sys.exit(0 if got == want else 1)
 PY
 ok "2 MB echoed through the tunnel"
+# --- re-running an exit must not break paired entries ---
+cert_before=$(sha256sum "$T/etc/hstun/cert.pem" | cut -d' ' -f1); secret_before=$(sha256sum "$T/etc/hstun/secret" | cut -d' ' -f1)
+./install.sh exit --yes >/dev/null 2>&1 || fail "exit re-run"
+[ "$(sha256sum "$T/etc/hstun/cert.pem" | cut -d' ' -f1)" = "$cert_before" ] || fail "re-run regenerated the certificate (paired entries would break)"
+[ "$(sha256sum "$T/etc/hstun/secret" | cut -d' ' -f1)" = "$secret_before" ] || fail "re-run changed the secret"
+[ "$("$T/bin/hstun-ctl" show-join --no-secret 2>/dev/null)" = "${J/hstun-pair:/hstun-join:}" ] || true
+ok "re-running the exit keeps the certificate, secret and paths"
+./install.sh exit --yes --new-cert >/dev/null 2>&1 || fail "exit --new-cert"
+[ "$(sha256sum "$T/etc/hstun/cert.pem" | cut -d' ' -f1)" != "$cert_before" ] || fail "--new-cert kept the old certificate"
+ok "--new-cert makes a new certificate on request"
+
+# --- the existing-instance prompt: answers come from a file (HSTUN_TTY) ---
+printf '1\n' >"$T/ans1"
+HSTUN_TTY="$T/ans1" ./install.sh exit >"$T/keep.log" 2>&1 || { cat "$T/keep.log"; fail "keep choice"; }
+grep -q "already installed" "$T/keep.log" && grep -q "nothing changed" "$T/keep.log" || fail "existing-instance prompt"
+ok "an installed instance is shown and 'keep' changes nothing"
+cert_now=$(sha256sum "$T/etc/hstun/cert.pem" | cut -d' ' -f1); secret_now=$(sha256sum "$T/etc/hstun/secret" | cut -d' ' -f1)
+printf '3\n' >"$T/ans3"
+HSTUN_TTY="$T/ans3" ./install.sh exit --mode direct --forward-target "127.0.0.1:$((base + 1))" --port "$((base + 30))" --backend-port "$((base + 5))" >"$T/reinstall.log" 2>&1 || { cat "$T/reinstall.log"; fail "reinstall choice"; }
+[ "$(sha256sum "$T/etc/hstun/cert.pem" | cut -d' ' -f1)" != "$cert_now" ] && [ "$(sha256sum "$T/etc/hstun/secret" | cut -d' ' -f1)" != "$secret_now" ] || fail "reinstall kept the old certificate or secret"
+ok "'reinstall' makes a new certificate and secret"
+
+# --- update is a no-op when current ---
+cur=$("$T/bin/hstun" version | sed 's/^hstun //')
+env -u HSTUN_TARBALL HSTUN_TEST_LATEST="$cur" "$T/bin/hstun-ctl" update >"$T/upd.log" 2>&1 || { cat "$T/upd.log"; fail "update"; }
+grep -q "already up to date" "$T/upd.log" || fail "update did not say it is current"
+ok "update does nothing when already on the latest release"
+
+# --- the menu: header, contextual items, status screen ---
+printf '1\n\n0\n' >"$T/menu.ans"
+HSTUN_NO_UPDATE_CHECK=1 HSTUN_TTY="$T/menu.ans" "$T/bin/hstun-ctl" >"$T/menu.log" 2>&1 || { cat "$T/menu.log"; fail "menu"; }
+grep -q "Installed on this host" "$T/menu.log" && grep -q "Show the pair code" "$T/menu.log" && grep -q "carrier" "$T/menu.log" || { cat "$T/menu.log"; fail "menu content"; }
+grep -q "Install an exit" "$T/menu.log" && fail "menu offers a first install although instances exist"
+ok "menu shows the installed instances and only the relevant items"
+
 for n in e1 ""; do ./install.sh uninstall --yes --purge ${n:+--name "$n"} >/dev/null 2>&1 || fail "uninstall ${n:-default}"; done
 [ -z "$(ls -A "$T/etc" 2>/dev/null)" ] && [ ! -e "$T/bin/hstun" ] && [ -z "$(ls -A "$T/systemd")" ] || fail "files left after --purge"
 ok "uninstall --purge leaves nothing"

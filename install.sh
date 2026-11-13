@@ -8,14 +8,14 @@
 #   bash <(curl -Ls -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.githubusercontent.com/OWNER/hstun/main/install.sh)
 #
 # One command, two roles (one role per instance, any number of instances with --name):
-#   install.sh exit   [flags]   the server side: listens, is the exit (kharej host)
-#   install.sh entry  [flags]   the client side: owns the client-facing ports (Iran host)
+#   install.sh exit   [flags]   the server side: listens, is the exit (the outside host)
+#   install.sh entry  [flags]   the client side: owns the client-facing ports (the restricted host)
 #   hstun-ctl status|logs|restart|update|show-join|show-secret|uninstall   after installing
 # Run it with no arguments for a menu. Every question has a flag or an HSTUN_* environment variable,
 # so it runs unattended with --yes. See README.md ("Install").
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.2.13"
+INSTALLER_VERSION="0.3.0"
 REPO="${HSTUN_REPO:-HamidrezaTg/hstun}"
 WANT_VERSION="${HSTUN_VERSION:-}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
@@ -30,7 +30,7 @@ SYSTEMD_DIR="${HSTUN_SYSTEMD_DIR:-/etc/systemd/system}"
 SVC_USER="${HSTUN_USER:-hstunsvc}"
 
 # ---------- output ----------
-if [ -t 1 ]; then R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[1m'; N=$'\e[0m'; else R=; G=; Y=; B=; N=; fi
+if [ -t 1 ]; then R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[1m'; D=$'\e[2m'; N=$'\e[0m'; else R=; G=; Y=; B=; D=; N=; fi
 info() { printf '%s\n' "${G}[hstun]${N} $*"; }
 warn() { printf '%s\n' "${Y}[hstun] warning:${N} $*" >&2; }
 die() { printf '%s\n' "${R}[hstun] error:${N} $*" >&2; exit 1; }
@@ -41,24 +41,27 @@ trap 'rc=$?; [ -n "${STAGE:-}" ] && rm -rf "$STAGE"; exit $rc' EXIT
 YES=0
 TTY=""
 if [ -t 0 ]; then TTY=/dev/stdin; elif [ -r /dev/tty ] && (: </dev/tty) 2>/dev/null; then TTY=/dev/tty; fi
+if [ -n "${HSTUN_TTY:-}" ]; then TTY=$HSTUN_TTY; fi # tests feed answers from a file
+if [ -n "$TTY" ]; then exec 9<"$TTY"; fi # one descriptor for every prompt, so a file of answers is read in order
 
 # ask VAR "prompt" [default] [optional]: keeps a value that is already set (flag, env, saved config).
 ask() {
-  local name=$1 prompt=$2 def=${3-} opt=${4-} ans
+  local name=$1 prompt=$2 def=${3-} opt=${4-} ans dv="DEF_$1"
   if [ -n "${!name-}" ]; then return 0; fi
+  if [ -n "${!dv-}" ]; then def=${!dv}; fi # the value this instance had before "Change settings"
   if [ "$YES" = 1 ] || [ -z "$TTY" ]; then
     if [ -z "$def" ] && [ -z "$opt" ]; then die "missing value: $prompt (pass the matching flag, see: install.sh help)"; fi
     printf -v "$name" '%s' "$def"
     return 0
   fi
-  read -r -p "$prompt${def:+ [$def]}: " ans <"$TTY" || true
+  read -r -p "$prompt${def:+ [$def]}: " ans <&9 || true
   printf -v "$name" '%s' "${ans:-$def}"
   if [ -z "${!name}" ] && [ -z "$opt" ]; then die "a value is required: $prompt"; fi
 }
 ask_secret() { # VAR "prompt": hidden input
   local name=$1 prompt=$2 ans
   [ -z "$TTY" ] && die "no terminal to read the secret from; use --secret-file or --secret-from"
-  read -r -s -p "$prompt: " ans <"$TTY" || true
+  read -r -s -p "$prompt: " ans <&9 || true
   echo
   printf -v "$name" '%s' "$ans"
 }
@@ -66,7 +69,7 @@ confirm() { # "question" [y|n default]
   local q=$1 def=${2:-n} ans
   if [ "$YES" = 1 ]; then return 0; fi
   if [ -z "$TTY" ]; then [ "$def" = y ]; return; fi
-  read -r -p "$q [$([ "$def" = y ] && echo Y/n || echo y/N)]: " ans <"$TTY" || true
+  read -r -p "$q [$([ "$def" = y ] && echo Y/n || echo y/N)]: " ans <&9 || true
   ans=${ans:-$def}
   case "$ans" in y | Y | yes) return 0 ;; *) return 1 ;; esac
 }
@@ -102,8 +105,10 @@ pkg_install() {
   detect_pm
   case "$PM" in
     apt)
-      if [ "$APT_UPDATED" = 0 ]; then apt-get update -qq >/dev/null; APT_UPDATED=1; fi
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null ;;
+      local log; log=$(mktemp)
+      if [ "$APT_UPDATED" = 0 ]; then apt-get update -qq >"$log" 2>&1 || { cat "$log" >&2; rm -f "$log"; die "apt-get update failed"; }; APT_UPDATED=1; fi
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >"$log" 2>&1 || { cat "$log" >&2; rm -f "$log"; die "could not install: $*"; }
+      rm -f "$log" ;;
     dnf) dnf install -y -q "$@" >/dev/null ;;
     yum) yum install -y -q "$@" >/dev/null ;;
     pacman) pacman -S --noconfirm --needed "$@" >/dev/null ;;
@@ -204,7 +209,7 @@ NAME=""
 ROLE="" MODE="" FORWARD_TARGET="" PORT="" DOMAIN="" CERT="" KEY="" ACME="" EMAIL="" ALLOW_FROM="" DECOY_DIR="" BACKEND_PORT=""
 JOIN="" JOIN_SECRET="" NO_SECRET=0 SERVER="" CARRIER="" WS_PATH="" HTTP_PATH="" SECRET_FILE="" SECRET_FROM="" TLS_VERIFY="" SPKI="" CONNECT="" SNI=""
 FORWARD_LISTEN="" FORWARD_NAME="" CONNS="" CHUNK_PARALLEL="" SOCKS_LISTEN="" NO_FW="" ADMIN_PORT="" SELF_SIGNED="" PUBLIC_ADDR=""
-FOLLOW=0 PURGE=0 ALL=0 DRY_RUN=0 ADOPT_ONLY=""
+FOLLOW=0 PURGE=0 ALL=0 FORCE=0 RECONFIGURE=0 REINSTALL=0 NEW_CERT=0 CUSTOMIZE=0 SKIP_LOAD="" DRY_RUN=0 ADOPT_ONLY=""
 ADOPTED="" ADOPT_UNITS="" ADOPT_BIN=""
 
 set_paths() {
@@ -221,6 +226,7 @@ load_conf() { # saved values only fill what is still empty (flags win)
   local k v line
   while IFS= read -r line; do
     k=${line%%=*}; v=${line#*=}
+    case " $SKIP_LOAD " in *" $k "*) continue ;; esac
     case " ${CONF_KEYS[*]} " in *" $k "*) [ -n "${!k-}" ] || printf -v "$k" '%s' "$(eval "printf '%s' $v")" ;; esac
   done <"$ETC/install.conf"
 }
@@ -232,11 +238,44 @@ save_conf() {
 reset_conf() { local k; for k in "${CONF_KEYS[@]}"; do printf -v "$k" '%s' ""; done; }
 inst_bin() { echo "${ADOPT_BIN:-$BIN_DIR/hstun}"; }
 # an existing hstun that this script did not create must never be overwritten by an install
-guard_existing() {
+guard_existing() { # ROLE-WANTED
+  if [ -n "$ROLE" ] && [ "$ROLE" != "${1:-$ROLE}" ]; then die "instance ${NAME:-default} is an $ROLE; use --name to install an ${1} next to it"; fi
   if [ -n "$ADOPTED" ]; then die "instance ${NAME:-default} was adopted from a hand-made setup; install would rewrite its files. Use update, restart or uninstall, or pick another --name."; fi
   if [ ! -f "$ETC/install.conf" ] && { [ -f "$ETC/server.toml" ] || [ -f "$ETC/client.toml" ]; }; then
     die "found an hstun setup in $ETC that was not installed by hstun-ctl. Run: install.sh adopt   (or choose another --name)"
   fi
+}
+# An instance of this name exists: say what it is and let the user keep, change or reinstall it.
+# Returns 1 when the user chose to keep it unchanged.
+existing_prompt() {
+  [ -f "$ETC/install.conf" ] || return 0
+  grep -q '^ADOPTED=1' "$ETC/install.conf" && return 0 # guard_existing explains that one
+  local sum c k dump=""
+  sum=$( (reset_conf; load_conf
+    if [ "$ROLE" = exit ]; then printf 'exit, mode %s, port %s%s, forwards to %s' "$MODE" "${PORT:-$BACKEND_PORT}" "${DOMAIN:+, domain $DOMAIN}" "$FORWARD_TARGET"
+    else printf 'entry, %s via %s, listens on %s' "$SERVER" "${CARRIER:-ws}" "$FORWARD_LISTEN"; fi) )
+  info "instance ${NAME:-default} is already installed: $sum"
+  if [ "$REINSTALL" = 1 ]; then reinstall_wipe; return 0; fi
+  if [ "$RECONFIGURE" = 1 ] || [ "$YES" = 1 ] || [ -z "$TTY" ]; then return 0; fi
+  echo "  1) Keep it as it is (nothing changes)"
+  echo "  2) Change settings (the certificate, secret and paths are kept, so paired entries keep working)"
+  echo "  3) Reinstall from scratch (new certificate, secret and paths: every entry must be paired again)"
+  c=""; ask c "Choose" 1
+  case "$c" in
+    1) info "nothing changed"; return 1 ;;
+    2) for k in MODE FORWARD_TARGET PORT DOMAIN ALLOW_FROM SERVER CARRIER FORWARD_LISTEN FORWARD_NAME CONNECT SNI; do
+         dump=$(reset_conf; load_conf; printf 'DEF_%s=%q\n' "$k" "${!k-}")
+         eval "$dump"; SKIP_LOAD="$SKIP_LOAD $k"
+       done ;;
+    3) reinstall_wipe ;;
+    *) die "choose 1, 2 or 3" ;;
+  esac
+}
+reinstall_wipe() {
+  # stop the running instance first, otherwise its own listener makes the new port check fail
+  ( reset_conf; load_conf; for u in $(service_units); do sysd stop "$u"; done ) || true
+  rm -f "${ETC:?}/cert.pem" "${ETC:?}/key.pem" "${ETC:?}/secret" "${ETC:?}/install.conf" "${ETC:?}/server.toml" "${ETC:?}/client.toml"
+  info "starting from scratch: new certificate, secret and paths"
 }
 need_installed() { [ -f "$ETC/install.conf" ] || die "no hstun instance${NAME:+ named $NAME} found in $ETC (install it first)"; load_conf; }
 
@@ -640,7 +679,7 @@ start_unit() { # unit
 
 install_exit() {
   need_root
-  set_paths; load_conf; guard_existing
+  set_paths; existing_prompt || return 0; load_conf; guard_existing exit
   ROLE="exit"
   if [ -z "$MODE" ]; then
     if [ "$YES" != 1 ] && [ -n "$TTY" ]; then
@@ -653,7 +692,7 @@ install_exit() {
     else MODE=nginx; fi
   fi
   case "$MODE" in nginx | direct | cloudflared) ;; *) die "--mode must be nginx, direct or cloudflared" ;; esac
-  ask FORWARD_TARGET "Where does the tunnelled TCP go on this host (the loopback inbound of your panel, host:port)" ""
+  ask FORWARD_TARGET "Where should tunnelled traffic go on this host? Your proxy's address, for example a VLESS inbound on 127.0.0.1:19990" ""
   case "$FORWARD_TARGET" in *:*) ;; *) die "--forward-target must look like 127.0.0.1:19990" ;; esac
   ADMIN_PORT=${ADMIN_PORT:-$(free_port 9109)}
 
@@ -666,7 +705,8 @@ install_exit() {
     direct)
       ask PORT "Public TLS port" "$(port_busy 443 && echo 2083 || echo 443)"
       ask DOMAIN "Domain that points at this host (empty = self-signed certificate, pinned by the entry)" "" opt
-      ask ALLOW_FROM "Only accept connections from these CIDRs (comma separated, empty = anyone)" "" opt
+      if [ -z "$ALLOW_FROM" ] && [ "$YES" != 1 ] && [ -n "$TTY" ] && ! confirm "Only accept connections from specific IP addresses?" n; then :
+      else ask ALLOW_FROM "Allowed addresses as CIDRs, comma separated (empty = anyone)" "" opt; fi
       ensure_cmds openssl ;;
     cloudflared)
       ask BACKEND_PORT "Loopback port for the cloudflared ingress" "$(free_port 18444)"
@@ -692,6 +732,8 @@ install_exit() {
     direct)
       if [ -n "$CERT" ] && [ -n "$KEY" ]; then cp "$CERT" "$ETC/cert.pem"; cp "$KEY" "$ETC/key.pem"
       elif [ -n "$DOMAIN" ] && [ -n "$ACME" ]; then cert_acme; cp "$CERT" "$ETC/cert.pem"; cp "$KEY" "$ETC/key.pem"
+      elif [ -s "$ETC/cert.pem" ] && [ -s "$ETC/key.pem" ] && [ -n "$SELF_SIGNED" ] && [ "$NEW_CERT" != 1 ]; then
+        info "keeping the existing certificate (entries that pinned it keep working)"
       else SELF_SIGNED=1; cert_selfsigned "$ETC"; fi
       own "$SVC_USER:$SVC_USER" "$ETC/cert.pem" "$ETC/key.pem"; chmod 0600 "$ETC/key.pem" ;;
   esac
@@ -756,14 +798,19 @@ print_exit_summary() {
   echo
   echo "  If hstun-ctl is not installed there yet, put the one-line installer in front:  bash <(curl -Ls https://raw.githubusercontent.com/$REPO/main/install.sh) entry --join '...'"
   echo "  Print it again any time:  hstun-ctl${NAME:+ --name $NAME} show-join      (without the secret: show-join --no-secret)"
-  echo "  Create the inner proxy (for example a VLESS inbound) listening on $FORWARD_TARGET before testing."
+  echo "  Next: make sure your proxy (for example a VLESS inbound) is listening on $FORWARD_TARGET."
+  if [ "$MODE" = direct ] && [ -n "$SELF_SIGNED" ] && [ -z "$DOMAIN" ]; then
+    echo "  Tip: an IP address with a self-signed certificate is the easiest setup to recognise. With a domain, nginx mode looks like an ordinary website."
+  fi
 }
 ensure_user_account() {
   [ "$TEST" = 1 ] && return 0
   id "$SVC_USER" >/dev/null 2>&1 && return 0
   local uid=61999 sh; sh=$(command -v nologin || echo /usr/sbin/nologin)
   while getent passwd "$uid" >/dev/null || getent group "$uid" >/dev/null; do uid=$((uid - 1)); done
-  useradd --system --uid "$uid" --user-group --no-create-home --shell "$sh" "$SVC_USER"
+  # a uid above SYS_UID_MAX makes useradd warn; raise the limit for this call only
+  useradd -K SYS_UID_MAX=65000 --system --uid "$uid" --user-group --no-create-home --shell "$sh" "$SVC_USER" 2>/dev/null \
+    || useradd --system --uid "$uid" --user-group --no-create-home --shell "$sh" "$SVC_USER"
   info "created the service account $SVC_USER (uid $uid)"
 }
 
@@ -785,7 +832,7 @@ parse_join() {
 }
 install_entry() {
   need_root
-  set_paths; load_conf; guard_existing
+  set_paths; existing_prompt || return 0; load_conf; guard_existing entry
   ROLE=entry
   [ -n "$JOIN" ] && parse_join
   ask SERVER "Exit address (host:port)" ""
@@ -796,10 +843,28 @@ install_entry() {
   ask TLS_VERIFY "Certificate check (system = CA certificate, spki = pinned self-signed)" system
   [ "$TLS_VERIFY" = spki ] && ask SPKI "SPKI sha256 of the exit certificate (hex)" ""
   case "$TLS_VERIFY" in system | spki) ;; *) die "--tls-verify must be system or spki" ;; esac
-  ask CONNECT "Dial this ip:port instead of resolving the name (empty = resolve)" "" opt
-  ask SNI "TLS server name (empty = the host of the exit address)" "" opt
-  ask FORWARD_LISTEN "Client-facing listen address for the tunnel (host:port)" "127.0.0.1:20151"
-  ask FORWARD_NAME "Forward name (must match the exit; default x1)" x1
+  local adv=0 who=""
+  if [ "$CUSTOMIZE" = 1 ]; then adv=1
+  elif [ "$YES" != 1 ] && [ -n "$TTY" ] && [ -z "$CONNECT$SNI$FORWARD_LISTEN$FORWARD_NAME" ] \
+    && confirm "Change advanced options (dial address, TLS name, forward name, listen address)?" n; then adv=1; fi
+  if [ "$adv" = 1 ]; then
+    ask CONNECT "Dial this ip:port instead of resolving the name (empty = resolve)" "" opt
+    ask SNI "TLS server name (empty = the host of the exit address)" "" opt
+    ask FORWARD_LISTEN "Listen address for your proxy clients (host:port)" "0.0.0.0:20151"
+    ask FORWARD_NAME "Forward name (must match the exit; default x1)" x1
+  else
+    FORWARD_NAME=${FORWARD_NAME:-x1}
+    if [ -z "$FORWARD_LISTEN" ]; then
+      if [ "$YES" != 1 ] && [ -n "$TTY" ]; then
+        local dp=${DEF_FORWARD_LISTEN##*:}; dp=${dp:-$(free_port 20151)}
+        echo "Who will connect to the tunnel on this host?"
+        echo "  1) anyone: users connect to this host's public port $dp (the installer opens it in ufw)"
+        echo "  2) only programs on this host (127.0.0.1)"
+        ask who "Choose" 1
+        case "$who" in 1) FORWARD_LISTEN="0.0.0.0:$dp" ;; 2) FORWARD_LISTEN="127.0.0.1:$dp" ;; *) die "choose 1 or 2" ;; esac
+      else FORWARD_LISTEN="127.0.0.1:20151"; fi
+    fi
+  fi
   if [ "$CARRIER" = chunk ]; then CONNS=${CONNS:-1}; ask CHUNK_PARALLEL "Parallel requests for the chunk carrier" 8; else CONNS=${CONNS:-2}; fi
   ADMIN_PORT=${ADMIN_PORT:-$(free_port 9110)}
   case "$FORWARD_LISTEN" in *:*) ;; *) die "--forward-listen must look like 127.0.0.1:20151" ;; esac
@@ -808,7 +873,7 @@ install_entry() {
 
   fetch_release; install_files; ensure_user_account
   prepare_dirs
-  if [ ! -s "$ETC/secret" ]; then
+  if [ ! -s "$ETC/secret" ] || [ -n "$SECRET_FILE$SECRET_FROM$JOIN_SECRET" ]; then
     if [ -n "$SECRET_FILE" ]; then install -m 0600 "$SECRET_FILE" "$ETC/secret"
     elif [ -n "$JOIN_SECRET" ]; then
       ( umask 077; printf '%s\n' "$JOIN_SECRET" >"$ETC/secret" )
@@ -834,7 +899,8 @@ install_entry() {
   save_conf
   start_unit "$UNIT-client.service"
   save_conf
-  info "${B}entry installed${N}${NAME:+ (instance $NAME)}: forward $FORWARD_NAME on $FORWARD_LISTEN -> $SERVER ($CARRIER)"
+  info "${B}entry installed${N}${NAME:+ (instance $NAME)}: $FORWARD_LISTEN -> $SERVER, carrier $CARRIER (${CARRIER/ws/WebSocket}), forward $FORWARD_NAME"
+  case "${SERVER%:*}" in *[!0-9.]* | "") ;; *) [ "$TLS_VERIFY" = spki ] && echo "  note     the exit is an IP address, so no TLS server name is sent. That is normal with a pinned certificate." ;; esac
   if have_systemd || [ "$TEST" = 1 ]; then
     local n=0
     for _ in $(seq 1 30); do
@@ -876,6 +942,8 @@ cmd_status() {
   set_paths; need_installed
   echo "instance   ${NAME:-default}   role $ROLE${MODE:+   mode $MODE}   config $ETC${ADOPTED:+   (adopted)}"
   echo "binary     $("$(inst_bin)" version 2>/dev/null || echo missing)   $(inst_bin)"
+  if [ "$ROLE" = entry ]; then echo "carrier    ${CARRIER:-ws}   server ${SERVER:-?}   listens ${FORWARD_LISTEN:-?}"
+  else echo "carriers   ws, http   public ${PORT:-?}${DOMAIN:+   domain $DOMAIN}   forwards to ${FORWARD_TARGET:-?}"; fi
   local u
   for u in $(units_of_instance); do printf '%-40s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"; done
   if [ -n "$ADMIN_PORT" ]; then
@@ -903,9 +971,22 @@ preflight_conf() {
   "$STAGE/hstun" check -config "$ETC/$m.toml" -mode "$m" >/dev/null 2>&1 \
     || die "the new binary rejects $ETC/$m.toml (instance ${NAME:-default}); nothing was changed. Run: $STAGE/hstun check -config $ETC/$m.toml"
 }
+latest_version() { # newest release without the leading v; empty when it cannot be read
+  if [ -n "${HSTUN_TEST_LATEST:-}" ]; then echo "$HSTUN_TEST_LATEST"; return 0; fi # test hook
+  have jq || return 0
+  local json
+  json=$(gh_curl -m 4 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null) || return 0
+  jq -r '.tag_name // empty' <<<"$json" | sed 's/^v//'
+}
 cmd_update() {
   need_root; set_paths; need_installed
   local before; before=$("$(inst_bin)" version 2>/dev/null || true)
+  if [ -z "${HSTUN_TARBALL:-}" ] && [ "${HSTUN_BUILD:-0}" != 1 ] && [ "$FORCE" != 1 ]; then
+    ensure_cmds curl jq
+    local want=${WANT_VERSION#v} cur=${before#hstun }
+    [ -n "$want" ] || want=$(latest_version)
+    if [ -n "$want" ] && [ "$want" = "$cur" ]; then info "already up to date ($cur); nothing was changed (--force reinstalls it)"; return 0; fi
+  fi
   fetch_release
   local dirs=() d u
   if [ "$ALL" = 1 ]; then
@@ -1098,32 +1179,131 @@ cmd_forget() { # stop managing an adopted instance; units, config and binary sta
 
 cmd_version() { echo "hstun-ctl $INSTALLER_VERSION; binary: $("$BIN_DIR/hstun" version 2>/dev/null || echo not installed)"; }
 
+# ---------- menu ----------
+list_instances() { # config directory of every managed instance
+  local d
+  for d in "$ETC_BASE"/hstun "$ETC_BASE"/hstun-*; do [ -f "$d/install.conf" ] && echo "$d"; done
+  return 0
+}
+have_role() { # true when a managed instance with this role exists
+  local d
+  while IFS= read -r d; do [ -n "$d" ] && grep -qs "^ROLE=$1\$" "$d/install.conf" && return 0; done < <(list_instances)
+  return 1
+}
+name_of() { local n=${1##*/hstun}; echo "${n#-}"; }
+instance_line() { # config directory: one status line
+  (
+    reset_conf; NAME=$(name_of "$1"); set_paths; load_conf
+    local st="?" sess="" a unit
+    unit=$(daemon_units | head -1)
+    [ -n "$unit" ] && st=$(systemctl is-active "$unit" 2>/dev/null || true)
+    if [ -n "$ADMIN_PORT" ]; then
+      a=$(curl -s -m 1 "http://127.0.0.1:$ADMIN_PORT/stats" 2>/dev/null || true)
+      [ -n "$a" ] && sess=$(printf '%s' "$a" | grep -o '"carrier"' | wc -l)
+    fi
+    local what=${MODE:-${CARRIER:-}}
+    printf '  %-10s %-6s %-12s %-9s %s\n' "${NAME:-default}" "$ROLE" "$what" "${st:-?}" "${sess:+$sess session(s)}"
+  )
+}
+update_banner() { # one red line when a newer release exists; cached for 6 hours, never waits long
+  [ "${HSTUN_NO_UPDATE_CHECK:-0}" = 1 ] && return 0
+  have jq || return 0
+  local cache="$ETC_BASE/.hstun-latest" latest="" cur
+  if [ -f "$cache" ] && [ -n "$(find "$cache" -mmin -360 2>/dev/null)" ]; then latest=$(cat "$cache" 2>/dev/null || true)
+  else
+    latest=$(latest_version 2>/dev/null || true)
+    if [ -n "$latest" ]; then printf '%s\n' "$latest" >"$cache" 2>/dev/null || true; fi
+  fi
+  cur=$("$BIN_DIR/hstun" version 2>/dev/null | sed 's/^hstun //' || true); cur=${cur:-$INSTALLER_VERSION}
+  if [ -n "$latest" ] && [ "$latest" != "$cur" ] && [ "$(printf '%s\n%s\n' "$cur" "$latest" | sort -V | tail -1)" = "$latest" ]; then
+    printf '%s\n' "${R}${B}  A newer release is available: $latest (installed: $cur). Choose Update.${N}"
+  fi
+}
+has_unmanaged() { # true when an hstun unit exists whose config directory is not managed yet
+  local line cfg
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    cfg=${line##*|}
+    [ -f "${cfg%/*}/install.conf" ] || return 0
+  done < <(adopt_candidates)
+  return 1
+}
+pick_instance() { # [role]: sets NAME to the instance to act on (asks when there are several)
+  local want=${1:-} d r dirs=() i c
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    if [ -n "$want" ]; then r=$(sed -n 's/^ROLE=//p' "$d/install.conf" | head -1); [ "$r" = "$want" ] || continue; fi
+    dirs+=("$d")
+  done < <(list_instances)
+  case ${#dirs[@]} in
+    0) warn "no ${want:+$want }instance is installed"; return 1 ;;
+    1) NAME=$(name_of "${dirs[0]}") ;;
+    *) echo "Which instance?"
+       for i in "${!dirs[@]}"; do printf '  %d) %s\n' $((i + 1)) "$(name_of "${dirs[$i]}" | sed 's/^$/default/')"; done
+       c=""; ask c "Choose" 1
+       case "$c" in *[!0-9]* | "") die "choose a number" ;; esac
+       [ "$c" -ge 1 ] && [ "$c" -le "${#dirs[@]}" ] || die "choose a number from the list"
+       NAME=$(name_of "${dirs[$((c - 1))]}") ;;
+  esac
+  set_paths
+}
+act_status() { local d; while IFS= read -r d; do reset_conf; NAME=$(name_of "$d"); set_paths; cmd_status; echo; done < <(list_instances); }
+act_pair() { pick_instance exit && { need_installed; echo "Send this one command to the entry host. It contains the secret, so use a private channel:"; echo; echo "  hstun-ctl entry --join '$(make_join secret)'"; }; }
+act_logs() { pick_instance && { FOLLOW=1; echo "Live log. Press Ctrl+C to return to the menu."; cmd_logs; }; }
+act_restart() { pick_instance && cmd_restart; }
+act_update() { local n; n=$(list_instances | wc -l); [ "$n" -gt 1 ] && ALL=1; pick_instance || return 0; cmd_update; }
+act_uninstall() { pick_instance || return 0; confirm "Also delete its configuration, secret and certificate?" n && PURGE=1; cmd_uninstall; }
+act_install_exit() { NAME=""; set_paths; install_exit; }
+act_install_entry() { NAME=""; set_paths; install_entry; }
+act_install_more() {
+  local role="" nm=""
+  echo "  1) another exit   2) another entry"; ask role "Choose" 1
+  ask nm "Name for the new instance (letters and digits)" ""
+  case "$nm" in *[!A-Za-z0-9_]* | "") die "the name must be letters, digits or underscore" ;; esac
+  NAME=$nm; set_paths
+  [ -f "$ETC/install.conf" ] && die "an instance named $nm already exists"
+  case "$role" in 1) install_exit ;; 2) install_entry ;; *) die "choose 1 or 2" ;; esac
+}
 menu() {
   [ -n "$TTY" ] || die "no terminal; run: install.sh help"
+  trap ':' INT # Ctrl+C stops a live log and returns here instead of leaving the script
+  local c i d insts labels actions hints
   while true; do
+    reset_conf; NAME=""; set_paths; SKIP_LOAD=""; FOLLOW=0; ALL=0; PURGE=0
+    insts=$(list_instances)
+    labels=(); actions=(); hints=()
     echo
-    echo "${B}hstun $INSTALLER_VERSION${N}"
-    echo "  1) Install an exit  (server side, on the kharej host)"
-    echo "  2) Install an entry (client side, on the Iran host)"
-    echo "  3) Status"
-    echo "  4) Update to the latest release"
-    echo "  5) Show the pair code for the entry (exit)"
-    echo "  6) Logs"
-    echo "  7) Uninstall"
-    echo "  8) Adopt hand-installed hstun units (manage them with hstun-ctl)"
-    echo "  0) Quit"
-    local c=""; read -r -p "Choose: " c <"$TTY" || exit 0
-    case "$c" in
-      1) install_exit ;;
-      2) install_entry ;;
-      3) cmd_status ;;
-      4) cmd_update ;;
-      5) cmd_show_join ;;
-      6) cmd_logs ;;
-      7) cmd_uninstall ;;
-      8) cmd_adopt ;;
-      0 | q | "") exit 0 ;;
-    esac
+    echo "${B}hstun $INSTALLER_VERSION${N}  (outside host = exit, restricted host = entry)"
+    update_banner
+    if [ -n "$insts" ]; then
+      echo "Installed on this host:"
+      while IFS= read -r d; do instance_line "$d"; done <<<"$insts"
+      echo
+      labels+=("Status"); actions+=(act_status); hints+=("units, versions, sessions")
+      if have_role exit; then
+        labels+=("Show the pair code"); actions+=(act_pair); hints+=("the one command that connects an entry to this exit")
+      fi
+      labels+=("Live log"); actions+=(act_logs); hints+=("follow the journal, Ctrl+C returns here")
+      labels+=("Restart"); actions+=(act_restart); hints+=("restart the tunnel service")
+      labels+=("Update"); actions+=(act_update); hints+=("latest release; nothing happens when you are current")
+      labels+=("Install another instance"); actions+=(act_install_more); hints+=("a second exit or entry on this host")
+      labels+=("Uninstall"); actions+=(act_uninstall); hints+=("remove an instance (you can keep its settings)")
+    else
+      labels+=("Install an exit"); actions+=(act_install_exit); hints+=("the outside host: receives the traffic and passes it to your proxy")
+      labels+=("Install an entry"); actions+=(act_install_entry); hints+=("the restricted host: your users connect here")
+    fi
+    if has_unmanaged; then labels+=("Adopt hand-installed units"); actions+=(cmd_adopt); hints+=("manage the hstun services you set up by hand"); fi
+    for i in "${!labels[@]}"; do printf '  %d) %-28s %s\n' $((i + 1)) "${labels[$i]}" "${D}${hints[$i]}${N}"; done
+    echo "  0) Exit"
+    c=""; read -r -p "Choose: " c <&9 || exit 0
+    case "$c" in 0 | q | "") exit 0 ;; esac
+    case "$c" in *[!0-9]*) warn "choose a number"; continue ;; esac
+    if [ "$c" -ge 1 ] && [ "$c" -le "${#labels[@]}" ]; then
+      local rc=0
+      set +e; ( set -e; "${actions[$((c - 1))]}" ); rc=$?; set -e
+      [ "$rc" = 0 ] || warn "that action stopped with an error (see above)"
+      read -r -p "Press Enter to return to the menu " c <&9 || exit 0
+    else warn "choose a number from the list"; fi
   done
 }
 
@@ -1144,7 +1324,8 @@ Entry:     --join STRING   --server HOST:PORT   --carrier ws|http|chunk   --ws-p
            --secret-file FILE | --secret-from USER@HOST[:SSHPORT]   --tls-verify system|spki   --spki HEX
            --connect IP:PORT   --sni NAME   --forward-listen ADDR:PORT   --forward-name NAME   --conns N
            --chunk-parallel N   --socks ADDR:PORT
-Manage:    --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)   --no-secret (show-join)
+Install:   --reconfigure (change an installed instance)   --reinstall (new certificate, secret, paths)   --new-cert   --customize (entry: ask the advanced questions)
+Manage:    --force (update even when current)   --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)   --no-secret (show-join)
 
 Environment: GITHUB_TOKEN (private repository), HSTUN_REPO, HSTUN_VERSION, HSTUN_TARBALL=FILE (offline), HSTUN_BUILD=1 (build from source).
 EOF
@@ -1190,6 +1371,11 @@ while [ $# -gt 0 ]; do
     --chunk-parallel) CHUNK_PARALLEL=$2; shift ;;
     --socks) SOCKS_LISTEN=$2; shift ;;
     --purge) PURGE=1 ;;
+    --force) FORCE=1 ;;
+    --reconfigure) RECONFIGURE=1 ;;
+    --reinstall) REINSTALL=1 ;;
+    --new-cert) NEW_CERT=1 ;;
+    --customize) CUSTOMIZE=1 ;;
     --no-secret) NO_SECRET=1 ;;
     --all) ALL=1 ;;
     --dry-run) DRY_RUN=1 ;;
