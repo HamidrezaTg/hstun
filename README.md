@@ -4,7 +4,7 @@ Carries TCP over an ordinary HTTPS connection. Everything rides authenticated,
 end-to-end encrypted, multiplexed sessions, so a handful of TLS connections
 carry any number of TCP streams. It runs in two modes (see "Modes").
 
-Status: v0.2.10, pre-release, not independently reviewed. Tested with the race detector, a wedge test,
+Status: v0.2.11, pre-release, not independently reviewed. Tested with the race detector, a wedge test,
 resets, added latency and a TLS-terminating tap; both modes were also run across real networks and
 inspected with packet captures (payload never appeared in clear). The direct mode has also run
 behind nginx on a real path, with TLS resumption seen on the wire, crash recovery and the black-box
@@ -99,7 +99,9 @@ Useful flags: `--carrier ws|http|chunk` (`chunk` for a path that cuts long conne
 | `hstun-ctl status` | units, sessions, streams, errors |
 | `hstun-ctl logs [-f]` | journal of the instance |
 | `hstun-ctl restart` | restart the instance's units |
-| `hstun-ctl update [--all]` | download the latest release, replace the binary, restart (`--all`: every instance) |
+| `hstun-ctl update [--all]` | download the latest release, check that it accepts every instance's config, replace the binary (previous one kept as `hstun.prev`), restart (`--all`: every instance) |
+| `hstun-ctl adopt [--dry-run] [--unit U]` | bring a hand-installed setup under `hstun-ctl` (see below) |
+| `hstun-ctl forget` | stop managing an adopted instance; it keeps running untouched |
 | `hstun-ctl show-join` / `show-secret` | pairing information (exit) |
 | `hstun-ctl uninstall [--purge]` | remove the units and firewall rules; `--purge` also deletes config, secret, decoy and, when no instance is left, the binary |
 
@@ -107,11 +109,33 @@ Several instances can live on one host (`--name NAME` on every command): each ge
 Installed files: `/usr/local/bin/{hstun,hstun-ctl}`, `/usr/share/hstun/` (examples, decoy), `/etc/hstun[-NAME]/` (config, secret, certificate, `install.conf`),
 `/var/www/hstun[-NAME]-decoy`, units `hstun[-NAME]-{server,client,nginx,nginx-reload}`, user `hstunsvc`.
 
+### Adopting a hand-installed setup
+
+If you set hstun up by hand (your own systemd units and config under `/etc/hstun[-NAME]/`), `adopt` lets `hstun-ctl` manage it without
+reinstalling anything:
+
+```bash
+bash <(curl ...) adopt --dry-run     # shows what it found, writes nothing
+bash <(curl ...) adopt               # registers it
+```
+
+It scans `/etc/systemd/system/hstun*.service` for `ExecStart=... hstun[-x] server|client -config FILE`, checks that the binary accepts the
+config, reads role, ports, paths and carrier from the config (and the nginx unit, its reload units and the domain for an nginx-fronted
+exit), and writes one file, `/etc/hstun[-NAME]/install.conf`. Your units, configs, binaries and firewall rules are not touched. The config
+directory must be `/etc/hstun` (default instance) or `/etc/hstun-NAME` with `server.toml` or `client.toml` inside; anything else is
+skipped with a message. Unit and binary names may be custom (`hstun-chunk.service`, `/usr/local/bin/hstun-chunk`): they are recorded.
+Afterwards `status`, `logs`, `restart`, `show-join`, `update` and `uninstall` work as for installed instances.
+`update` first runs `hstun check` with the new binary on every config and stops before replacing anything if one is rejected; it replaces
+the shared binary and any custom binary of an adopted instance and keeps the old ones as `*.prev`.
+`install.sh exit|entry` refuses to run over an adopted or otherwise unmanaged `/etc/hstun[-NAME]` (it would rewrite your files): adopt it
+or pick another `--name`. `uninstall` of an adopted instance removes its units (and with `--purge` its config directory and binary), but
+leaves ufw rules and certificates, which `hstun-ctl` did not create.
+
 ### Offline, from source, and releases
 
 - Offline: copy `hstun_VERSION_linux_ARCH.tar.gz` and run with `HSTUN_TARBALL=/path/to/it`.
 - From source: `HSTUN_BUILD=1 hstun-ctl update` (or on the first run). It downloads the source, fetches Go if needed and builds with the vendored dependencies.
-- Pin a version: `--version 0.2.10` (or `HSTUN_VERSION`). Another repository (a fork): `--repo OWNER/hstun` (or `HSTUN_REPO`).
+- Pin a version: `--version 0.2.11` (or `HSTUN_VERSION`). Another repository (a fork): `--repo OWNER/hstun` (or `HSTUN_REPO`).
 - Maintainers: `scripts/package.sh` builds `dist/hstun_VERSION_linux_{amd64,arm64}.tar.gz` and `SHA256SUMS`;
   publish with `gh release create vVERSION dist/hstun_*.tar.gz dist/SHA256SUMS --repo OWNER/hstun`. The installer verifies the checksum.
 
@@ -326,6 +350,7 @@ reports as reachable, and the scripts refuse to run with it.
 scripts/test.sh            # vet + race tests + short fuzz (about 2 minutes)
 scripts/test.sh -short     # skips the slow tests (wedge, throughput, 60 s idle)
 scripts/test-install.sh    # installer in a temp dir: exit + entry from the release tarball, echo through the tunnel, --purge (needs scripts/package.sh first)
+scripts/test-adopt.sh      # adopt/update/forget/purge on hand-made layouts in a temp dir (needs scripts/package.sh first)
 scripts/build.sh           # static build and sha256
 ```
 
@@ -382,3 +407,8 @@ public port and the CA certificate, serves the decoy, and proxies only the two s
 hstun on `127.0.0.1`. hstun runs with `trust_proxy = "loopback"` and, in that mode, may leave `tls_cert`/`tls_key` empty to serve plain HTTP on loopback (a second TLS layer measurably slowed downloads on a small VPS; the relay buffers in the nginx example matter too): it believes `X-Real-IP` only from a loopback peer (the config
 refuses a non-loopback `listen` or an `allow_from` in this mode), so the auth-failure limiter still works per real client.
 Without hstun's own per-IP cap, add a kernel connection cap (see the comment in the nginx example). Units: `deploy/hstun-nginx.service`, and `hstun-nginx-reload.{path,service,timer}` to reload nginx when the renewed certificate appears (edit the `PathChanged=` line).
+
+## License
+
+MIT, see `LICENSE`. The vendored libraries keep their own licenses, listed in `THIRD_PARTY_NOTICES.md` and shipped in
+`/usr/share/hstun/licenses/` by the installer.
