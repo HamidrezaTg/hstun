@@ -15,7 +15,7 @@
 # so it runs unattended with --yes. See README.md ("Install").
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.2.12"
+INSTALLER_VERSION="0.2.13"
 REPO="${HSTUN_REPO:-HamidrezaTg/hstun}"
 WANT_VERSION="${HSTUN_VERSION:-}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
@@ -202,7 +202,7 @@ install_files() {
 # ---------- instance state ----------
 NAME=""
 ROLE="" MODE="" FORWARD_TARGET="" PORT="" DOMAIN="" CERT="" KEY="" ACME="" EMAIL="" ALLOW_FROM="" DECOY_DIR="" BACKEND_PORT=""
-JOIN="" SERVER="" CARRIER="" WS_PATH="" HTTP_PATH="" SECRET_FILE="" SECRET_FROM="" TLS_VERIFY="" SPKI="" CONNECT="" SNI=""
+JOIN="" JOIN_SECRET="" NO_SECRET=0 SERVER="" CARRIER="" WS_PATH="" HTTP_PATH="" SECRET_FILE="" SECRET_FROM="" TLS_VERIFY="" SPKI="" CONNECT="" SNI=""
 FORWARD_LISTEN="" FORWARD_NAME="" CONNS="" CHUNK_PARALLEL="" SOCKS_LISTEN="" NO_FW="" ADMIN_PORT="" SELF_SIGNED="" PUBLIC_ADDR=""
 FOLLOW=0 PURGE=0 ALL=0 DRY_RUN=0 ADOPT_ONLY=""
 ADOPTED="" ADOPT_UNITS="" ADOPT_BIN=""
@@ -619,12 +619,18 @@ detect_addr() {
   a=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
   echo "${a:-YOUR.SERVER.IP}"
 }
-make_join() { # prints the join string (everything the entry needs except the secret)
+make_join() { # [secret]: prints the join string (everything the entry needs, secret only when asked) or, with "secret", the pair code
   local host=${DOMAIN:-${PUBLIC_ADDR:-$(detect_addr)}} srv port=$PORT tls=system spki="" car=${CARRIER:-ws}
   [ "$MODE" = cloudflared ] && { port=443; car=chunk; }
   srv="$host:$port"
   if [ "$MODE" = direct ] && [ -z "$DOMAIN" ] || { [ "$MODE" = direct ] && [ -n "$SELF_SIGNED" ]; }; then tls=spki; spki=$(spki_of "$ETC/cert.pem"); fi
-  printf 'hstun-join:%s' "$(printf 'server=%s\ncarrier=%s\nws_path=%s\nhttp_path=%s\ntls=%s\nspki=%s\n' "$srv" "$car" "$WS_PATH" "$HTTP_PATH" "$tls" "$spki" | base64 -w0)"
+  local text kind=join
+  text=$(printf 'server=%s\ncarrier=%s\nws_path=%s\nhttp_path=%s\ntls=%s\nspki=%s\n' "$srv" "$car" "$WS_PATH" "$HTTP_PATH" "$tls" "$spki")
+  if [ "${1:-}" = secret ]; then
+    [ -r "$ETC/secret" ] || die "cannot read $ETC/secret (run as root)"
+    text=$(printf '%s\nsecret=%s\n' "$text" "$(tr -d '\n' <"$ETC/secret")"); kind=pair
+  fi
+  printf 'hstun-%s:%s' "$kind" "$(printf '%s\n' "$text" | base64 -w0)"
 }
 start_unit() { # unit
   sysd daemon-reload
@@ -731,7 +737,7 @@ EOF
   print_exit_summary
 }
 print_exit_summary() {
-  local join; join=$(make_join)
+  local pair; pair=$(make_join secret)
   echo
   info "${B}exit installed${N} (mode $MODE${NAME:+, instance $NAME})"
   echo "  config   $ETC/server.toml    secret $ETC/secret    forward x1 -> $FORWARD_TARGET"
@@ -744,12 +750,12 @@ print_exit_summary() {
     echo "  Clients on a path that cuts long connections should use --carrier chunk."
   fi
   echo
-  echo "  Join string for the entry host (it contains everything except the secret):"
-  echo "    $join"
+  echo "  On the entry host run this one command (the code contains the secret: send it only over a private channel):"
   echo
-  echo "  On the entry host run:"
-  echo "    hstun-ctl entry --join '$join' --secret-from root@THIS-HOST"
-  echo "  or copy the secret yourself:  hstun-ctl show-secret   (here)   then   --secret-file FILE   (there)"
+  echo "    hstun-ctl entry --join '$pair'"
+  echo
+  echo "  If hstun-ctl is not installed there yet, put the one-line installer in front:  bash <(curl -Ls https://raw.githubusercontent.com/$REPO/main/install.sh) entry --join '...'"
+  echo "  Print it again any time:  hstun-ctl${NAME:+ --name $NAME} show-join      (without the secret: show-join --no-secret)"
   echo "  Create the inner proxy (for example a VLESS inbound) listening on $FORWARD_TARGET before testing."
 }
 ensure_user_account() {
@@ -763,6 +769,7 @@ ensure_user_account() {
 
 parse_join() {
   local raw=${JOIN#hstun-join:} text k v
+  raw=${raw#hstun-pair:}
   text=$(printf '%s' "$raw" | base64 -d 2>/dev/null) || die "the join string is not valid base64"
   while IFS='=' read -r k v; do
     case "$k" in
@@ -772,6 +779,7 @@ parse_join() {
       http_path) [ -n "$HTTP_PATH" ] || HTTP_PATH=$v ;;
       tls) [ -n "$TLS_VERIFY" ] || TLS_VERIFY=$v ;;
       spki) [ -n "$SPKI" ] || SPKI=$v ;;
+      secret) JOIN_SECRET=$v ;;
     esac
   done <<<"$text"
 }
@@ -802,13 +810,15 @@ install_entry() {
   prepare_dirs
   if [ ! -s "$ETC/secret" ]; then
     if [ -n "$SECRET_FILE" ]; then install -m 0600 "$SECRET_FILE" "$ETC/secret"
+    elif [ -n "$JOIN_SECRET" ]; then
+      ( umask 077; printf '%s\n' "$JOIN_SECRET" >"$ETC/secret" )
     elif [ -n "$SECRET_FROM" ]; then
       ensure_cmds ssh:openssh-client
       info "fetching the secret from $SECRET_FROM over ssh (it is not printed)"
       local target=${SECRET_FROM%%:*} sport=""; case "$SECRET_FROM" in *:*) sport=${SECRET_FROM##*:} ;; esac
       ( umask 077; ssh ${sport:+-p "$sport"} "$target" "cat ${REMOTE_SECRET:-/etc/hstun/secret} 2>/dev/null || sudo -n cat ${REMOTE_SECRET:-/etc/hstun/secret}" >"$ETC/secret" ) || die "could not fetch the secret from $SECRET_FROM"
     else
-      local s=""; ask_secret s "Paste the secret (output of 'hstun-ctl show-secret' on the exit; input is hidden)"
+      local s=""; ask_secret s "This join string has no secret. Paste the secret (hstun-ctl show-secret on the exit; input is hidden)"
       [ -n "$s" ] || die "empty secret"
       ( umask 077; printf '%s\n' "$s" >"$ETC/secret" )
     fi
@@ -919,7 +929,8 @@ cmd_update() {
 cmd_show_join() {
   set_paths; need_installed
   [ "$ROLE" = exit ] || die "show-join is for an exit"
-  make_join; echo
+  if [ "$NO_SECRET" = 1 ]; then make_join; else warn "this code contains the secret: send it only over a private channel (--no-secret prints the version without it)"; make_join secret; fi
+  echo
 }
 cmd_show_secret() {
   set_paths; need_installed
@@ -1096,7 +1107,7 @@ menu() {
     echo "  2) Install an entry (client side, on the Iran host)"
     echo "  3) Status"
     echo "  4) Update to the latest release"
-    echo "  5) Show join string (exit)"
+    echo "  5) Show the pair code for the entry (exit)"
     echo "  6) Logs"
     echo "  7) Uninstall"
     echo "  8) Adopt hand-installed hstun units (manage them with hstun-ctl)"
@@ -1133,7 +1144,7 @@ Entry:     --join STRING   --server HOST:PORT   --carrier ws|http|chunk   --ws-p
            --secret-file FILE | --secret-from USER@HOST[:SSHPORT]   --tls-verify system|spki   --spki HEX
            --connect IP:PORT   --sni NAME   --forward-listen ADDR:PORT   --forward-name NAME   --conns N
            --chunk-parallel N   --socks ADDR:PORT
-Manage:    --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)
+Manage:    --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)   --no-secret (show-join)
 
 Environment: GITHUB_TOKEN (private repository), HSTUN_REPO, HSTUN_VERSION, HSTUN_TARBALL=FILE (offline), HSTUN_BUILD=1 (build from source).
 EOF
@@ -1179,6 +1190,7 @@ while [ $# -gt 0 ]; do
     --chunk-parallel) CHUNK_PARALLEL=$2; shift ;;
     --socks) SOCKS_LISTEN=$2; shift ;;
     --purge) PURGE=1 ;;
+    --no-secret) NO_SECRET=1 ;;
     --all) ALL=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --unit) ADOPT_ONLY=$2; shift ;;

@@ -110,7 +110,7 @@ ok "adopt twice is harmless"
 has "$T/status.log" "(adopted)"
 "$T/bin/hstun-ctl" --name cf status >"$T/status2.log" 2>&1 || fail "status cf"
 has "$T/status2.log" "hstun-chunk.service"
-J=$("$T/bin/hstun-ctl" show-join); [ "${J#hstun-join:}" != "$J" ] || fail "show-join"
+J=$("$T/bin/hstun-ctl" show-join --no-secret); [ "${J#hstun-join:}" != "$J" ] || fail "show-join"
 echo "${J#hstun-join:}" | base64 -d | grep -q "server=hel.example.org:2083" || fail "join content"
 ok "status and show-join work on adopted instances"
 
