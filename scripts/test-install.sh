@@ -35,12 +35,16 @@ python3 "$T/echo.py" & pids+=($!)
 
 ./install.sh exit --yes --mode direct --forward-target "127.0.0.1:$((base + 1))" --port "$base" --backend-port "$((base + 5))" >"$T/exit.log" 2>&1 || { cat "$T/exit.log"; fail "exit install"; }
 ok "exit installed (direct, self-signed)"
-J=$("$T/bin/hstun-ctl" show-join); [ "${J#hstun-join:}" != "$J" ] || fail "show-join"
-ok "show-join"
+J=$("$T/bin/hstun-ctl" show-join 2>/dev/null); [ "${J#hstun-pair:}" != "$J" ] || fail "show-join prints a pair code"
+echo "${J#hstun-pair:}" | base64 -d | grep -q '^secret=' || fail "pair code lacks the secret"
+JN=$("$T/bin/hstun-ctl" show-join --no-secret 2>/dev/null); [ "${JN#hstun-join:}" != "$JN" ] || fail "show-join --no-secret"
+echo "${JN#hstun-join:}" | base64 -d | grep -q '^secret=' && fail "join string leaks the secret"
+ok "show-join: pair code with the secret, --no-secret without it"
 "$T/bin/hstun" server -config "$T/etc/hstun/server.toml" >"$T/server.log" 2>&1 & pids+=($!)
 sleep 1
-./install.sh entry --yes --name e1 --join "$J" --secret-file "$T/etc/hstun/secret" --forward-listen "127.0.0.1:$((base + 2))" >"$T/entry.log" 2>&1 || { cat "$T/entry.log"; fail "entry install"; }
-ok "entry installed from the join string"
+./install.sh entry --yes --name e1 --join "$J" --forward-listen "127.0.0.1:$((base + 2))" >"$T/entry.log" 2>&1 || { cat "$T/entry.log"; fail "entry install"; }
+cmp -s "$T/etc/hstun/secret" "$T/etc/hstun-e1/secret" || fail "secret not taken from the pair code"
+ok "entry installed from the pair code alone (no secret file, no ssh, no prompt)"
 "$T/bin/hstun" client -config "$T/etc/hstun-e1/client.toml" >"$T/client.log" 2>&1 & pids+=($!)
 for _ in $(seq 1 20); do
   admin=$(sed -n 's/^admin_listen = "\(.*\)"/\1/p' "$T/etc/hstun-e1/client.toml")

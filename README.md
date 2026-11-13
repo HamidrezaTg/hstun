@@ -4,7 +4,7 @@ Carries TCP over an ordinary HTTPS connection. Everything rides authenticated,
 end-to-end encrypted, multiplexed sessions, so a handful of TLS connections
 carry any number of TCP streams. It runs in two modes (see "Modes").
 
-Status: v0.2.12, pre-release, not independently reviewed. Tested with the race detector, a wedge test,
+Status: v0.2.13, pre-release, not independently reviewed. Tested with the race detector, a wedge test,
 resets, added latency and a TLS-terminating tap; both modes were also run across real networks and
 inspected with packet captures (payload never appeared in clear). The direct mode has also run
 behind nginx on a real path, with TLS resumption seen on the wire, crash recovery and the black-box
@@ -79,15 +79,17 @@ hstun-ctl exit --yes --mode direct --port 2083 --allow-from 203.0.113.7/32 --for
 hstun-ctl exit --yes --mode cloudflared --domain tunnel.example.org --backend-port 18444 --forward-target 127.0.0.1:19990
 ```
 
-It prints a **join string** (everything the entry needs except the secret) and the command for the other host. `hstun-ctl show-join` prints it again.
+It prints one ready-to-run command for the other host. The `hstun-pair:...` code in it holds everything the entry needs, including the secret, so send it only over a private channel. `hstun-ctl show-join` prints it again; `show-join --no-secret` prints the `hstun-join:...` form without the secret.
 
 ### 2. The entry (the host in Iran)
 
+Paste the command the exit printed:
+
 ```bash
-hstun-ctl entry --join 'hstun-join:...' --secret-from root@EXIT-HOST
+hstun-ctl entry --join 'hstun-pair:...'
 ```
 
-The secret is fetched over ssh straight into a 0600 file and never printed. Alternatives: `--secret-file FILE` (copy it yourself), or paste it when asked.
+That is all: the secret travels inside the pair code and is written to a 0600 file. If you were given a secret-less `hstun-join:...` string instead, the installer asks you to paste the secret (input hidden); `--secret-file FILE` and `--secret-from USER@HOST` (ssh) also work.
 Useful flags: `--carrier ws|http|chunk` (`chunk` for a path that cuts long connections, such as Cloudflare from Iran), `--connect IP:443`
 (dial a clean address instead of resolving the name), `--forward-listen 0.0.0.0:20151` (the client-facing port; the installer opens it in ufw),
 `--socks 127.0.0.1:1080`, `--conns N`, `--tls-verify spki --spki HEX`. Then point your proxy clients at `ENTRY-HOST:20151`.
@@ -135,7 +137,7 @@ leaves ufw rules and certificates, which `hstun-ctl` did not create.
 
 - Offline: copy `hstun_VERSION_linux_ARCH.tar.gz` and run with `HSTUN_TARBALL=/path/to/it`.
 - From source: `HSTUN_BUILD=1 hstun-ctl update` (or on the first run). It downloads the source, fetches Go if needed and builds with the vendored dependencies.
-- Pin a version: `--version 0.2.12` (or `HSTUN_VERSION`). Another repository (a fork): `--repo OWNER/hstun` (or `HSTUN_REPO`).
+- Pin a version: `--version 0.2.13` (or `HSTUN_VERSION`). Another repository (a fork): `--repo OWNER/hstun` (or `HSTUN_REPO`).
 - Maintainers: `scripts/package.sh` builds `dist/hstun_VERSION_linux_{amd64,arm64}.tar.gz` and `SHA256SUMS`;
   publish with `gh release create vVERSION dist/hstun_*.tar.gz dist/SHA256SUMS --repo OWNER/hstun`. The installer verifies the checksum.
 
