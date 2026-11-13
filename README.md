@@ -4,7 +4,7 @@ Carries TCP over an ordinary HTTPS connection. Everything rides authenticated,
 end-to-end encrypted, multiplexed sessions, so a handful of TLS connections
 carry any number of TCP streams. It runs in two modes (see "Modes").
 
-Status: v0.2.7, pre-release, not independently reviewed. Tested with the race detector, a wedge test,
+Status: v0.2.9, pre-release, not independently reviewed. Tested with the race detector, a wedge test,
 resets, added latency and a TLS-terminating tap; both modes were also run across real networks and
 inspected with packet captures (payload never appeared in clear). The direct mode has also run
 behind nginx on a real path, with TLS resumption seen on the wire, crash recovery and the black-box
