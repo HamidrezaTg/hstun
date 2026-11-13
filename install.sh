@@ -190,7 +190,8 @@ fetch_release() {
 install_files() {
   [ -x "$STAGE/hstun" ] || die "the release has no hstun binary"
   install -d "$BIN_DIR" "$SHARE_DIR"
-  [ -x "$BIN_DIR/hstun" ] && cp -p "$BIN_DIR/hstun" "$BIN_DIR/hstun.prev"
+  # keep the previous binary as .prev, but never overwrite a rollback copy with an identical binary
+  if [ -x "$BIN_DIR/hstun" ] && ! cmp -s "$BIN_DIR/hstun" "$STAGE/hstun"; then cp -p "$BIN_DIR/hstun" "$BIN_DIR/hstun.prev"; fi
   install -m 0755 "$STAGE/hstun" "$BIN_DIR/hstun"
   rm -rf "$SHARE_DIR/deploy" "$SHARE_DIR/decoy-example" "$SHARE_DIR/licenses"
   cp -r "$STAGE/share/." "$SHARE_DIR/"
@@ -906,7 +907,7 @@ cmd_update() {
     (
       reset_conf; NAME=${d##*/hstun}; NAME=${NAME#-}; set_paths; load_conf
       if [ -n "$ADOPT_BIN" ] && [ "$ADOPT_BIN" != "$BIN_DIR/hstun" ]; then
-        [ -x "$ADOPT_BIN" ] && cp -p "$ADOPT_BIN" "$ADOPT_BIN.prev"
+        if [ -x "$ADOPT_BIN" ] && ! cmp -s "$ADOPT_BIN" "$BIN_DIR/hstun"; then cp -p "$ADOPT_BIN" "$ADOPT_BIN.prev"; fi
         install -m 0755 "$BIN_DIR/hstun" "$ADOPT_BIN"
       fi
       for u in $(daemon_units); do sysd restart "$u"; done
