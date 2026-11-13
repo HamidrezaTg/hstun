@@ -1,0 +1,51 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+      - name: Go version must be >= 1.26.11 (older releases have reachable standard-library CVEs)
+        run: |
+          v=$(go env GOVERSION | sed 's/^go//')
+          [ "$(printf '%s\n1.26.11\n' "$v" | sort -V | head -1)" = "1.26.11" ] || { echo "Go $v is too old"; exit 1; }
+      - run: go vet ./...
+      - run: go build -mod=vendor ./...
+      - run: scripts/test.sh -short
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -S warning install.sh scripts/*.sh
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+      - name: Package and run the installer tests in a temporary directory
+        run: |
+          scripts/package.sh
+          scripts/test-install.sh
+          scripts/test-adopt.sh
+          scripts/test-ctl.sh
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
