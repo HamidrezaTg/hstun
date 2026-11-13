@@ -22,7 +22,7 @@ jobs:
           [ "$want" = "$have" ] || { echo "tag $want != version $have"; exit 1; }
       - run: scripts/test.sh -short
       - run: scripts/package.sh
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: 'dist/hstun_*.tar.gz'
       - name: Publish the release
