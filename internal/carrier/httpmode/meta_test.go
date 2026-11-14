@@ -183,7 +183,10 @@ func TestBrowserHeadersFollowTheProfile(t *testing.T) {
 		o.Fingerprint = fp
 		r.echo(t, o, 20<<10)
 		r.mu.Lock()
-		got := r.reqHdr
+		got := map[string]bool{} // a copy: the handler goroutines keep writing to the original
+		for k := range r.reqHdr {
+			got[k] = true
+		}
 		r.mu.Unlock()
 		switch fp {
 		case "chrome":
