@@ -99,6 +99,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/HamidrezaTg/hstun/main/install
 
 ## مجوز
 
-Copyright (C) 2026 Hamidreza. مجوز عمومی گنو آفرو (GNU AGPL) نسخهٔ ۳ یا بالاتر، فایل `LICENSE`. کتابخانه‌های همراه مجوز خودشان را حفظ می‌کنند؛ فهرستشان در `THIRD_PARTY_NOTICES.md` است و نصب‌کننده آن‌ها را در `/usr/share/hstun/licenses/` می‌گذارد.
+Copyright (C) 2026 Hamidreza. مجوز عمومی گنو آفرو (GNU AGPL) نسخهٔ ۳ یا بالاتر، فایل `LICENSE`. اگر نسخهٔ تغییریافتهٔ hstun را به‌عنوان سرویس شبکه‌ای اجرا کنید، بند ۱۳ از شما می‌خواهد کد منبع آن را در اختیار کاربران همان سرویس بگذارید. کتابخانه‌های همراه مجوز خودشان را حفظ می‌کنند؛ فهرستشان در `THIRD_PARTY_NOTICES.md` است و نصب‌کننده آن‌ها را در `/usr/share/hstun/licenses/` می‌گذارد.
 
 </div>

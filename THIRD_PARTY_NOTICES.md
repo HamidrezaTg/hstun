@@ -1,6 +1,6 @@
 # Third-party software
 
-hstun is released under the GNU Affero General Public License, version 3 or later (see `LICENSE`). The release binaries are built with the
+hstun is released under the GNU Affero General Public License, version 3 or later (see `LICENSE`). All the licenses below (MIT, BSD, ISC, MPL-2.0) allow being combined with an AGPL work. The release binaries are built with the
 following libraries, vendored in `vendor/` (yamux with two small patches, see below). Each keeps its own license file next to its source.
 
 | Library | Version | License | License file |

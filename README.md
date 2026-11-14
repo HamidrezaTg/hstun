@@ -91,4 +91,5 @@ a per-source connection cap; with another firewall (or a cloud firewall) you ope
 
 ## License
 
-Copyright (C) 2026 Hamidreza. GNU Affero General Public License, version 3 or later, see `LICENSE`. The vendored libraries keep their own licenses, listed in `THIRD_PARTY_NOTICES.md` and shipped in `/usr/share/hstun/licenses/` by the installer.
+Copyright (C) 2026 Hamidreza. GNU Affero General Public License, version 3 or later (`LICENSE`). If you run a modified
+hstun as a network service, section 13 requires you to offer its source to the people who use that service. The vendored libraries keep their own licenses, listed in `THIRD_PARTY_NOTICES.md` and shipped in `/usr/share/hstun/licenses/` by the installer.
