@@ -42,7 +42,7 @@ Each item has an id used by the benchmark. "Effort" is a rough estimate for one 
 
 | id | item | status |
 |---|---|---|
-| T1 | browser ClientHello through uTLS (`tls_fingerprint`; chrome, chrome_nopq, firefox, safari, ios, android, go), http/1.1-only ALPN, no ALPS, session resumption, User-Agent that matches | done, hello checked by test (JA4 cipher hash of Chrome) and against four public sites (chrome, chrome_nopq, firefox pass; safari failed once); **default not yet proven on the Iran path (benchmark B1)** |
+| T1 | browser ClientHello through uTLS (`tls_fingerprint`; chrome, chrome_nopq, firefox, safari, ios, android, go), http/1.1-only ALPN, no ALPS, session resumption, User-Agent that matches | done, hello checked by test (JA4 cipher hash of Chrome) and against four public sites (chrome, chrome_nopq, firefox pass; safari failed once); **default checked on two Iran-side paths (benchmark B1: no breakage); the survival benefit is not shown yet** |
 | T0 | written guardrails removed (AGENTS.md, docs, templates) | done |
 
 ### P1: cheap, high value (about a day each)
@@ -137,6 +137,7 @@ request, throughput of a 100 MB transfer. Measured with the same tool so every a
 | arm | question |
 |---|---|
 | B1 | `go` vs `chrome` vs `chrome_nopq` vs `firefox` on each real path: does the browser hello pass everywhere the Go hello did, and where does the large post-quantum hello fail? (decides the default) |
+| | **B1 result (2026-11-14, one Iran-side host, 8 rounds):** all four profiles came up and fetched 252 KB through a direct nginx exit and through Cloudflare with no failures that depended on the profile and the same speed; the post-quantum hello did not break either path. The default stays `chrome`, `chrome_nopq` the fallback. These paths did not block the Go hello either, so the survival benefit is not shown yet: repeat on other ISPs and mobile networks. |
 | B2 | the first-record fragmentation (T2) on top of the winner |
 | B3 | padding off / light / strong (T6) on the wire metrics and on cost |
 | B4 | keepalive jitter and lifetime rotation (T3, T7) on the idle pattern |
