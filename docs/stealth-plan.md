@@ -7,7 +7,7 @@ GhostWire / GhostTunnel. Status of each item is in the last column of the tables
 
 ## 1. What we are up against
 
-What the Iran-side classifier is known or suspected to look at, from our own tests (IRVPS to Cloudflare names,
+What the Iran-side classifier is known or suspected to look at, from our own tests (an Iran-side host to Cloudflare-fronted names,
 BackPack, C-Tunnel, NipoVPN, hstun over 2026-11-10 to 2026-11-13) and from what the other projects report:
 
 | signal | what we know | where hstun stood |
@@ -15,7 +15,7 @@ BackPack, C-Tunnel, NipoVPN, hstun over 2026-11-10 to 2026-11-13) and from what 
 | SNI in clear | name based blocking; some well known names (google, cloudflare) are filtered; ECH did not help on one path | fixed name, our own domain |
 | ClientHello fingerprint (JA3/JA4) | every serious client in this space (Xray, BackPack) sends a browser hello; plain Go is recognisable | **was Go's own; now a browser profile (done)** |
 | bytes per connection | to some Cloudflare names a flow dies after about 24 KB up / 48 KB down, depending on SNI not IP | `chunk` carrier works around it |
-| direction | flows that start in Iran are cut after a few packets on some paths; flows into Iran work | direct mode IRVPS to Helsinki works; Cloudflare path does not |
+| direction | flows that start in Iran are cut after a few packets on some paths; flows into Iran work | direct mode from an Iran-side host to an nginx exit works; the Cloudflare path does not |
 | active probing | a prober that connects without the secret must see an ordinary site | decoy site; needs a byte-identical audit |
 | traffic shape | fixed-period empty keepalives, constant record sizes, many short connections at a steady rate | fixed 25 s ping, no padding, chunk ~30 connections/s under load |
 | TLS inside TLS | an inner TLS handshake (VLESS+Reality, https sites through the tunnel) leaves a recognisable pattern of record lengths | not addressed |
