@@ -40,6 +40,14 @@ const (
 	// Stream open kinds.
 	KindForward = 1
 	KindConnect = 2
+	// KindCaps is a stream that only says what the opener's end understands (payload
+	// CapPadding); the peer answers ReplyOK. An older peer refuses it, which is the "no".
+	KindCaps = 3
+	// KindProbe is a measuring stream for `hstun probe` (payload "echo" or "source:N"),
+	// served by an exit that has probes enabled.
+	KindProbe = 4
+
+	CapPadding = "pad1"
 
 	// MaxOpenPayload caps the stream open header payload.
 	MaxOpenPayload = 270

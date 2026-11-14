@@ -24,6 +24,13 @@ type Options struct {
 	TLS      *tls.Config
 	// Fingerprint is the ClientHello profile (see fingerprint.go); empty means DefaultFingerprint.
 	Fingerprint string
+	// Fragment splits the ClientHello (see fragment.go); empty means off.
+	Fragment string
+	// NoCookies makes the http carrier send its metadata in the old X-Hs-* headers
+	// (a hello without the cookie marker). For tests of old-server behaviour.
+	NoCookies bool
+	// Tuning adapts the chunk sizes between sessions (chunk mode); nil keeps them fixed.
+	Tuning *ChunkTuning
 	// UserAgent is sent on every request; empty means the one that matches Fingerprint (see UA).
 	UserAgent string
 
@@ -116,19 +123,65 @@ const DefaultUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KH
 
 type uaTransport struct {
 	rt http.RoundTripper
-	ua string
+	o  Options
 }
 
 func (t uaTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
-	r.Header.Set("User-Agent", t.ua)
+	r.Header.Set("User-Agent", t.o.UA())
+	t.o.browserHeaders(r)
 	return t.rt.RoundTrip(r)
 }
 
-// WithUserAgent sets the User-Agent header on every request of rt.
-func WithUserAgent(rt http.RoundTripper, ua string) http.RoundTripper {
-	if ua == "" {
-		ua = DefaultUserAgent
+// WithBrowserHeaders gives every request of rt the User-Agent and the other
+// headers a browser of the configured fingerprint profile sends with a script's
+// requests, so a CDN or proxy that can read them sees an ordinary client. No
+// Accept-Encoding is added: the carriers carry binary bodies that must not be
+// re-encoded on the way.
+func WithBrowserHeaders(rt http.RoundTripper, o Options) http.RoundTripper {
+	return uaTransport{rt: rt, o: o}
+}
+
+func (o Options) browserHeaders(r *http.Request) {
+	fp := o.Fingerprint
+	if fp == "" {
+		fp = DefaultFingerprint
 	}
-	return uaTransport{rt: rt, ua: ua}
+	h := r.Header
+	set := func(k, v string) {
+		if h.Get(k) == "" {
+			h.Set(k, v)
+		}
+	}
+	if fp == FingerprintGo {
+		return // the old behaviour: only the User-Agent
+	}
+	ws := strings.EqualFold(h.Get("Upgrade"), "websocket")
+	set("Accept", "*/*")
+	if fp == FingerprintFirefox {
+		set("Accept-Language", "en-US,en;q=0.5")
+	} else {
+		set("Accept-Language", "en-US,en;q=0.9")
+	}
+	if fp == FingerprintAndroid {
+		return
+	}
+	set("Origin", "https://"+r.URL.Host)
+	if ws {
+		set("Sec-Fetch-Dest", "websocket")
+		set("Sec-Fetch-Mode", "websocket")
+	} else {
+		set("Sec-Fetch-Dest", "empty")
+		set("Sec-Fetch-Mode", "cors")
+	}
+	set("Sec-Fetch-Site", "same-origin")
+	if fp == FingerprintChrome || fp == FingerprintChromeN {
+		v := "133"
+		if fp == FingerprintChromeN {
+			v = "120"
+		}
+		set("Sec-Ch-Ua", `"Not(A:Brand";v="99", "Google Chrome";v="`+v+`", "Chromium";v="`+v+`"`)
+		set("Sec-Ch-Ua-Mobile", "?0")
+		set("Sec-Ch-Ua-Platform", `"Linux"`)
+	}
 }

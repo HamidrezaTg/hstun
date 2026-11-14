@@ -270,20 +270,24 @@ func FlakyBudgetProxy(t testing.TB, target string, upBudget, downBudget, blackho
 					defer src.Close()
 					buf := make([]byte, 16*1024)
 					sent := 0
+					swallowing := false
 					for {
 						n, err := src.Read(buf)
 						if n > 0 {
 							if delay > 0 {
 								time.Sleep(delay)
 							}
-							if hole {
+							if hole || swallowing {
 								continue // swallow everything on this connection
 							}
 							if sent+n > budget {
 								if cut.CompareAndSwap(false, true) {
 									cuts.Add(1)
 								}
-								// swallow: keep draining so the sender never sees an error
+								// swallow from here on, as a real cut does (a later small read must not
+								// slip through behind a hole: that would corrupt the TLS stream instead
+								// of stalling it); keep draining so the sender never sees an error
+								swallowing = true
 								continue
 							}
 							if _, werr := dst.Write(buf[:n]); werr != nil {

@@ -12,8 +12,8 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hstun/internal/carrier"
@@ -25,6 +25,12 @@ const (
 	upWorkers   = 3
 	downPollers = 2
 	failAfter   = 60 * time.Second
+	// chunkFailAfter: in chunk mode a request that cannot pass for this long is stuck on a
+	// chunk the path will not carry; the session ends and the next one asks for less.
+	chunkFailAfter = 12 * time.Second
+	// chunkStuckFailures: this many failed polls with no data delivered in between (and no
+	// quiet half minute) make a chunk-mode session give up.
+	chunkStuckFailures = 5
 
 	// Chunk mode defaults. Measured from Iran to a Cloudflare customer name:
 	// about 20 KB upstream and 48 KB downstream per connection get through, more
@@ -47,6 +53,8 @@ type clientConn struct {
 	*sconn
 	hc     *http.Client
 	base   string
+	names  metaNames
+	cookie bool // metadata travels in cookies (the server answered the hello in that style)
 	sid    []byte
 	sidHex string
 	sk     []byte
@@ -55,10 +63,15 @@ type clientConn struct {
 
 	upSeq uint64
 
-	chunk   bool          // short-connection mode
-	upSize  int           // largest upstream body
-	downMax int           // downstream payload budget asked of the server (chunk mode)
-	attempt time.Duration // timeout of one upstream request
+	chunk   bool // short-connection mode
+	upSize  int  // largest upstream body
+	downMax int  // downstream payload budget asked of the server (chunk mode)
+	tuning  *carrier.ChunkTuning
+	// failAfter is how long a request may keep failing before the session gives up.
+	failAfter time.Duration
+	born      time.Time
+	failed    atomic.Bool
+	attempt   time.Duration // timeout of one upstream request
 
 	rmu      sync.Mutex
 	recvNext uint64
@@ -73,13 +86,20 @@ func Dial(ctx context.Context, o carrier.Options, key []byte, name string) (net.
 	d.Timeout = 10 * time.Second
 	d.KeepAlive = netx.KeepAlive
 	nUp, nDown, upSize, downMax, attempt := upWorkers, downPollers, upChunk, 0, 30*time.Second
+	fail := failAfter
 	tlsTimeout := 10 * time.Second
 	if o.Chunk {
+		defer func() { println("DEBUG sizes", upSize, downMax) }()
 		par := orDefault(o.ChunkPar, DefaultChunkPar)
 		nUp, nDown = par, par
 		upSize = min(orDefault(o.ChunkUp, DefaultChunkUp), upChunk)
 		downMax = min(orDefault(o.ChunkDown, DefaultChunkDown), downChunk)
+		if o.Tuning != nil {
+			tu, td := o.Tuning.Sizes()
+			upSize, downMax = min(upSize, tu), min(downMax, td)
+		}
 		attempt = chunkAttempt
+		fail = chunkFailAfter
 		d.Timeout, tlsTimeout = chunkConnect, chunkConnect
 	}
 	tr := &http.Transport{
@@ -110,24 +130,33 @@ func Dial(ctx context.Context, o carrier.Options, key []byte, name string) (net.
 		MaxConnsPerHost:     nUp + nDown + 2,
 		IdleConnTimeout:     90 * time.Second,
 	}
-	hc := &http.Client{Transport: carrier.WithUserAgent(tr, o.UA())}
+	hc := &http.Client{Transport: carrier.WithBrowserHeaders(tr, o)}
 	base := "https://" + o.Server + o.HTTPPath
 
 	st, hello, err := proto.ClientBegin(key, proto.CarrierHTTP, name)
 	if err != nil {
 		return nil, nil, err
 	}
-	cid, chal, err := post(ctx, hc, base+pathHello, hello, nil)
+	names := namesFor(o.HTTPPath)
+	helloHdr := http.Header{"Cookie": {names.helloCookie()}}
+	if o.NoCookies {
+		helloHdr = nil
+	}
+	cid, chal, err := post(ctx, hc, base+pathHello, hello, helloHdr)
 	if err != nil {
 		tr.CloseIdleConnections()
 		return nil, nil, fmt.Errorf("hello: %w", err)
 	}
-	cidHdr := cid.Get(hdrCid)
+	cidVal, useCookie := names.responseID(cid)
 	proof, err := st.Challenge(chal)
 	if err != nil {
 		return nil, nil, err
 	}
-	_, resp, err := post(ctx, hc, base+pathAuth, proof, http.Header{hdrCid: {cidHdr}})
+	authHdr := http.Header{hdrCid: {cidVal}}
+	if useCookie {
+		authHdr = http.Header{"Cookie": {names.id + "=" + cidVal}}
+	}
+	_, resp, err := post(ctx, hc, base+pathAuth, proof, authHdr)
 	if err != nil {
 		tr.CloseIdleConnections()
 		return nil, nil, fmt.Errorf("auth: %w", err)
@@ -143,12 +172,15 @@ func Dial(ctx context.Context, o carrier.Options, key []byte, name string) (net.
 
 	cctx, cancel := context.WithCancel(context.Background())
 	c := &clientConn{
-		hc: hc, base: base, sid: sid, sidHex: hex.EncodeToString(sid), sk: res.SessionKey,
+		hc: hc, base: base, names: names, cookie: useCookie, sid: sid, sidHex: hex.EncodeToString(sid), sk: res.SessionKey,
 		ctx: cctx, cancel: cancel, recvNext: 1, recvBuf: map[uint64][]byte{}, lastData: time.Now(),
-		chunk: o.Chunk, upSize: upSize, downMax: downMax, attempt: attempt,
+		chunk: o.Chunk, upSize: upSize, downMax: downMax, attempt: attempt, tuning: o.Tuning, born: time.Now(), failAfter: fail,
 	}
 	c.sconn = newSconn("hstun-http-client", o.Server, func() {
 		cancel()
+		if c.tuning != nil && !c.failed.Load() && time.Since(c.born) > growAfter {
+			c.tuning.Grow() // it ran fine for a while: try bigger chunks next time
+		}
 		go c.sendClose()
 		tr.CloseIdleConnections()
 	})
@@ -208,17 +240,11 @@ func (c *clientConn) newReq(ctx context.Context, path string, body []byte, seq, 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set(hdrSid, c.sidHex)
-	if seq != 0 {
-		req.Header.Set(hdrSeq, strconv.FormatUint(seq, 10))
-	}
+	mx := 0
 	if path == pathDown {
-		req.Header.Set(hdrAck, strconv.FormatUint(ack, 10))
-		if c.downMax > 0 {
-			req.Header.Set(hdrMax, strconv.Itoa(c.downMax))
-		}
+		mx = c.downMax
 	}
-	req.Header.Set(hdrTag, hex.EncodeToString(reqTag(c.sk, path, c.sid, seq, ack, body)))
+	c.names.writeReq(req.Header, c.cookie, c.sidHex, seq, ack, mx, reqTag(c.sk, path, c.sid, seq, ack, body), seq != 0, path == pathDown, path)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	return req, nil
 }
@@ -262,7 +288,7 @@ func (c *clientConn) upWorker() {
 			continue
 		}
 		if !c.sendUp(seq, data) {
-			c.Close()
+			c.stuck()
 			return
 		}
 		c.confirm(len(data))
@@ -277,7 +303,7 @@ func (c *clientConn) sendUp(seq uint64, data []byte) bool {
 		return c.sendUpHedged(seq, data)
 	}
 	backoff := 200 * time.Millisecond
-	give := time.Now().Add(failAfter)
+	give := time.Now().Add(c.failAfter)
 	for c.ctx.Err() == nil {
 		ctx, cancel := context.WithTimeout(c.ctx, c.attempt)
 		req, err := c.newReq(ctx, pathUp, data, seq, 0)
@@ -354,7 +380,7 @@ func (c *clientConn) sendUpHedged(seq uint64, data []byte) bool {
 			results <- failed
 		}
 	}
-	give := time.Now().Add(failAfter)
+	give := time.Now().Add(c.failAfter)
 	outstanding := 1
 	go attempt()
 	hedge := time.NewTimer(chunkHedge)
@@ -369,11 +395,11 @@ func (c *clientConn) sendUpHedged(seq uint64, data []byte) bool {
 			case fatal:
 				return false
 			}
+			if time.Now().After(give) {
+				return false // hedged attempts keep overlapping, so outstanding may never reach zero
+			}
 			if outstanding > 0 {
 				continue
-			}
-			if time.Now().After(give) {
-				return false
 			}
 			wait := jitter(100 * time.Millisecond)
 			if r == busy {
@@ -415,6 +441,7 @@ func (c *clientConn) active() bool {
 func (c *clientConn) poller(i int) {
 	backoff := 200 * time.Millisecond
 	failing := time.Time{}
+	nfail, lastFail := 0, time.Time{} // chunk mode: failures that no data delivery has cleared
 	for c.ctx.Err() == nil {
 		if i > 0 && !c.active() && !c.hasTx() {
 			if !sleepCtx(c.ctx, 200*time.Millisecond) {
@@ -432,7 +459,9 @@ func (c *clientConn) poller(i int) {
 		switch {
 		case err == nil && (status == http.StatusOK || status == http.StatusNoContent):
 			backoff = 200 * time.Millisecond
-			failing = time.Time{}
+			if status == http.StatusOK || !c.chunk {
+				failing, nfail = time.Time{}, 0
+			}
 		case err == nil && (status == http.StatusGone || status == http.StatusForbidden || status == http.StatusBadRequest):
 			c.Close()
 			return
@@ -440,8 +469,22 @@ func (c *clientConn) poller(i int) {
 			if failing.IsZero() {
 				failing = time.Now()
 			}
-			if time.Since(failing) > failAfter {
-				c.Close()
+			if c.chunk {
+				// An empty answer (204) does not mean the path is fine: a downstream chunk that
+				// is too big for the path is cut again and again, with empty answers in between.
+				// Count the failures instead of timing an unbroken run of them.
+				if time.Since(lastFail) > 30*time.Second {
+					nfail = 0
+				}
+				nfail++
+				lastFail = time.Now()
+				if nfail >= chunkStuckFailures {
+					c.stuck()
+					return
+				}
+			}
+			if time.Since(failing) > c.failAfter {
+				c.stuck()
 				return
 			}
 			if !sleepCtx(c.ctx, jitter(backoff)) {
@@ -521,4 +564,20 @@ func (c *clientConn) deliver(seq uint64, data []byte) {
 		c.pushRx(d)
 	}
 	c.rmu.Unlock()
+}
+
+// growAfter is how long a session must have run before its chunk sizes count as safe.
+const growAfter = 3 * time.Minute
+
+// stuck closes a session that could not move a request for failAfter. In chunk
+// mode that usually means a chunk is bigger than what the path lets through, and
+// a chunk that is already numbered cannot be cut smaller, so the next session
+// starts with smaller sizes instead.
+func (c *clientConn) stuck() {
+	println("DEBUG stuck; sizes", c.upSize, c.downMax, time.Since(c.born).String())
+	c.failed.Store(true)
+	if c.tuning != nil {
+		c.tuning.Shrink()
+	}
+	c.Close()
 }

@@ -84,7 +84,7 @@ func Dial(ctx context.Context, o carrier.Options) (net.Conn, error) {
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
 		DisableCompression:  true,
 	}
-	hc := &http.Client{Transport: carrier.WithUserAgent(tr, o.UA())}
+	hc := &http.Client{Transport: carrier.WithBrowserHeaders(tr, o)}
 	c, _, err := websocket.Dial(ctx, "wss://"+o.Server+o.WSPath, &websocket.DialOptions{
 		HTTPClient:      hc,
 		CompressionMode: websocket.CompressionDisabled,

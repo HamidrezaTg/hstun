@@ -98,6 +98,7 @@ func (o Options) UA() string {
 // Handshake runs the client TLS handshake on raw with the configured
 // fingerprint and returns the encrypted connection. The caller closes raw on error.
 func (o Options) Handshake(ctx context.Context, raw net.Conn) (net.Conn, error) {
+	raw = newFragmentConn(raw, o.Fragment)
 	name := o.Fingerprint
 	if name == "" {
 		name = DefaultFingerprint

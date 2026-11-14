@@ -27,12 +27,16 @@ type Hooks struct {
 	// Allow and Fail implement the per-IP failed-handshake limit.
 	Allow func(ip string) bool
 	Fail  func(ip string)
+	// Path is the secret http_path; it names the cookies that carry the request metadata.
+	Path string
 }
 
 type Server struct {
 	kr  *auth.Keyring
 	h   Hooks
 	log *slog.Logger
+
+	names metaNames
 
 	mu       sync.Mutex
 	pending  map[string]*pendingHS
@@ -46,7 +50,7 @@ type pendingHS struct {
 }
 
 func NewServer(kr *auth.Keyring, h Hooks, log *slog.Logger) *Server {
-	s := &Server{kr: kr, h: h, log: log, pending: map[string]*pendingHS{}, sessions: map[string]*srvSession{}}
+	s := &Server{kr: kr, h: h, log: log, names: namesFor(h.Path), pending: map[string]*pendingHS{}, sessions: map[string]*srvSession{}}
 	go s.reaper()
 	return s
 }
@@ -71,14 +75,14 @@ func readBody(w http.ResponseWriter, r *http.Request, max int64) ([]byte, bool) 
 		return nil, false
 	}
 	if r.ContentLength < 0 || r.ContentLength > max {
-		http.Error(w, "size", http.StatusRequestEntityTooLarge)
+		decoy.Error(w, http.StatusRequestEntityTooLarge)
 		return nil, false
 	}
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(15 * time.Second))
 	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
 	if err != nil {
-		http.Error(w, "body", http.StatusBadRequest)
+		decoy.Error(w, http.StatusBadRequest)
 		return nil, false
 	}
 	return b, true
@@ -87,7 +91,7 @@ func readBody(w http.ResponseWriter, r *http.Request, max int64) ([]byte, bool) 
 func (s *Server) hello(w http.ResponseWriter, r *http.Request) {
 	ip := s.h.IP(r)
 	if !s.h.Allow(ip) {
-		http.Error(w, "slow down", http.StatusTooManyRequests)
+		decoy.Error(w, http.StatusTooManyRequests)
 		return
 	}
 	body, ok := readBody(w, r, proto.MaxHandshakeMsg)
@@ -119,17 +123,18 @@ func (s *Server) hello(w http.ResponseWriter, r *http.Request) {
 	// real ones until the entries expire.
 	if mine >= maxPendingPerIP {
 		s.mu.Unlock()
-		http.Error(w, "slow down", http.StatusTooManyRequests)
+		decoy.Error(w, http.StatusTooManyRequests)
 		return
 	}
 	if len(s.pending) >= maxPending {
 		s.mu.Unlock()
-		http.Error(w, "busy", http.StatusServiceUnavailable)
+		decoy.Error(w, http.StatusServiceUnavailable)
 		return
 	}
 	s.pending[key] = &pendingHS{st: st, ip: ip, exp: now.Add(pendingTTL)}
 	s.mu.Unlock()
-	w.Header().Set(hdrCid, key)
+	_, asCookie := cookieVal(r, s.names.id)
+	s.names.setID(w, asCookie, key)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	_, _ = w.Write(chal)
 }
@@ -139,13 +144,13 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cid := r.Header.Get(hdrCid)
+	cid := s.names.readMeta(r).id
 	s.mu.Lock()
 	p := s.pending[cid]
 	delete(s.pending, cid)
 	s.mu.Unlock()
 	if p == nil || time.Now().After(p.exp) {
-		http.Error(w, "expired", http.StatusGone)
+		decoy.Error(w, http.StatusGone)
 		return
 	}
 	res, acc, err := p.st.Finish(body)
@@ -174,7 +179,8 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) lookup(w http.ResponseWriter, r *http.Request) (*srvSession, []byte) {
 	// A wrong method or a missing/malformed session id is what a scanner sends,
 	// not our client, so it gets the same page as any unknown path.
-	sidHex := r.Header.Get(hdrSid)
+	m := s.names.readMeta(r)
+	sidHex := m.id
 	sid, err := hex.DecodeString(sidHex)
 	if r.Method != http.MethodPost || err != nil || len(sid) != 16 {
 		decoy.NotFound(w, r)
@@ -184,15 +190,10 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) (*srvSession, []
 	sess := s.sessions[sidHex]
 	s.mu.Unlock()
 	if sess == nil {
-		http.Error(w, "gone", http.StatusGone)
+		decoy.Error(w, http.StatusGone)
 		return nil, nil
 	}
 	return sess, sid
-}
-
-func u64(r *http.Request, name string) (uint64, bool) {
-	v, err := strconv.ParseUint(r.Header.Get(name), 10, 64)
-	return v, err == nil
 }
 
 func (s *Server) up(w http.ResponseWriter, r *http.Request) {
@@ -200,27 +201,30 @@ func (s *Server) up(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		return
 	}
-	seq, ok := u64(r, hdrSeq)
+	m := s.names.readMeta(r)
+	seq, ok := m.seq, m.seqOK
 	if !ok || seq == 0 {
-		http.Error(w, "seq", http.StatusBadRequest)
+		decoy.Error(w, http.StatusBadRequest)
 		return
 	}
 	body, ok := readBody(w, r, upChunk)
 	if !ok {
 		return
 	}
-	tag, _ := hex.DecodeString(r.Header.Get(hdrTag))
+	tag := m.tag
 	if !auth.Equal(tag, reqTag(sess.key, pathUp, sid, seq, 0, body)) {
-		http.Error(w, "tag", http.StatusForbidden)
+		decoy.Error(w, http.StatusForbidden)
 		return
 	}
 	sess.touch()
 	ack, accepted := sess.acceptUp(seq, body)
 	if !accepted {
-		http.Error(w, "busy", http.StatusTooManyRequests)
+		decoy.Error(w, http.StatusTooManyRequests)
 		return
 	}
-	w.Header().Set(hdrAck, strconv.FormatUint(ack, 10))
+	if !m.cookie {
+		w.Header().Set(hdrAck, strconv.FormatUint(ack, 10))
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -230,17 +234,18 @@ func (s *Server) down(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.ContentLength != 0 {
-		http.Error(w, "size", http.StatusRequestEntityTooLarge)
+		decoy.Error(w, http.StatusRequestEntityTooLarge)
 		return
 	}
-	ack, ok := u64(r, hdrAck)
+	m := s.names.readMeta(r)
+	ack, ok := m.ack, m.ackOK
 	if !ok {
-		http.Error(w, "ack", http.StatusBadRequest)
+		decoy.Error(w, http.StatusBadRequest)
 		return
 	}
-	tag, _ := hex.DecodeString(r.Header.Get(hdrTag))
+	tag := m.tag
 	if !auth.Equal(tag, reqTag(sess.key, pathDown, sid, 0, ack, nil)) {
-		http.Error(w, "tag", http.StatusForbidden)
+		decoy.Error(w, http.StatusForbidden)
 		return
 	}
 	sess.touch()
@@ -248,7 +253,7 @@ func (s *Server) down(w http.ResponseWriter, r *http.Request) {
 	// Chunk-mode clients ask for smaller responses (a path that cuts connections
 	// after a few tens of KB); anything else gets the full size.
 	max, holdFor, retx := downChunk, hold, rto
-	if v, ok := u64(r, hdrMax); ok && v >= minDownChunk && v < downChunk {
+	if v, ok := m.mx, m.mxO; ok && v >= minDownChunk && v < downChunk {
 		max, holdFor, retx = int(v), chunkHoldIdle, chunkRTO
 		sess.conn.setTxLimit(chunkTxLimit)
 		if sess.busy() {
@@ -279,7 +284,7 @@ func (s *Server) down(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if closed {
-			http.Error(w, "gone", http.StatusGone)
+			decoy.Error(w, http.StatusGone)
 			return
 		}
 		select {
@@ -303,9 +308,9 @@ func (s *Server) close(w http.ResponseWriter, r *http.Request) {
 	if _, ok := readBody(w, r, 64); !ok {
 		return
 	}
-	tag, _ := hex.DecodeString(r.Header.Get(hdrTag))
+	tag := s.names.readMeta(r).tag
 	if !auth.Equal(tag, reqTag(sess.key, pathClose, sid, 0, 0, nil)) {
-		http.Error(w, "tag", http.StatusForbidden)
+		decoy.Error(w, http.StatusForbidden)
 		return
 	}
 	sess.conn.Close()

@@ -71,6 +71,15 @@ type ServerSection struct {
 	// DrainTimeout is how long a stopping process lets the streams in flight
 	// finish (no new sessions or streams are accepted meanwhile); "0s" = stop at once.
 	DrainTimeout string `toml:"drain_timeout"`
+
+	// Padding adds random filler to small records so record sizes do not give the
+	// traffic away: off, light (small records, 0-400 bytes; the default) or strong
+	// (the first records look like 900-1400 byte ones, small ones get more). Only used
+	// with a peer that understands it (0.5.0 and later); older peers see no change.
+	Padding string `toml:"padding"`
+
+	// DisableProbe refuses the measuring streams of `hstun probe` (exit role).
+	DisableProbe bool `toml:"disable_probe"`
 }
 
 type Forward struct {
@@ -124,6 +133,10 @@ type ClientSection struct {
 	// TLSFingerprint is the ClientHello the client sends: chrome (default), chrome_nopq,
 	// firefox, safari, ios, android, or go (crypto/tls as it is).
 	TLSFingerprint string `toml:"tls_fingerprint"`
+	// TLSFragment splits the first TLS record the client sends: off (default), tcp
+	// (small TCP segments a few ms apart), record (several TLS records) or both. It
+	// defeats filters that read only the first packet; it adds a few ms per connection.
+	TLSFragment string `toml:"tls_fragment"`
 
 	Ping        string `toml:"ping"`
 	IdleTimeout string `toml:"idle_timeout"`
@@ -136,6 +149,19 @@ type ClientSection struct {
 	// DrainTimeout is how long a stopping process lets the streams in flight
 	// finish (no new connections or streams meanwhile); "0s" = stop at once.
 	DrainTimeout string `toml:"drain_timeout"`
+
+	// Padding: off, light (default) or strong, see the server key of the same name.
+	Padding string `toml:"padding"`
+
+	// SessionAge ends a carrier session after a while and replaces it, so no
+	// connection lives for days: "auto" (default, a random 10-40 minutes each),
+	// "off", or a duration (varied by +-25 %). The old session stops taking new
+	// streams, finishes the ones it has (up to 2 minutes) and closes. Needs conns >= 2
+	// and does nothing for the chunk carrier, which already uses short connections.
+	SessionAge string `toml:"session_age"`
+
+	// DisableProbe refuses the measuring streams of `hstun probe` (exit role).
+	DisableProbe bool `toml:"disable_probe"`
 }
 
 type SocksExit struct {
@@ -174,6 +200,7 @@ func LoadServer(path string) (*ServerFile, error) {
 	f.Server.AuthFailPerMinPerIP = 10
 	f.Server.IdleTimeout = "10m"
 	f.Server.DrainTimeout = "10s"
+	f.Server.Padding = "light"
 	if err := decode(path, f); err != nil {
 		return nil, err
 	}
@@ -246,6 +273,9 @@ func (f *ServerFile) validate() error {
 		return errors.New("server: max_mbit_per_key (0..100000) and max_new_streams_per_sec_per_key must be >= 0 (0 = off)")
 	}
 	if err := checkDrain("server", s.DrainTimeout); err != nil {
+		return err
+	}
+	if err := checkPadding("server", s.Padding); err != nil {
 		return err
 	}
 	for _, c := range s.AllowFrom {
@@ -327,6 +357,8 @@ func LoadClient(path string) (*ClientFile, error) {
 	f.Client.Ping = "25s"
 	f.Client.IdleTimeout = "10m"
 	f.Client.DrainTimeout = "10s"
+	f.Client.Padding = "light"
+	f.Client.SessionAge = "auto"
 	f.SocksExit.DenyPrivate = true
 	if err := decode(path, f); err != nil {
 		return nil, err
@@ -346,6 +378,9 @@ func (f *ClientFile) validate() error {
 		if _, _, err := net.SplitHostPort(c.Connect); err != nil {
 			return fmt.Errorf("client: connect: %w", err)
 		}
+	}
+	if !carrier.ValidFragment(c.TLSFragment) {
+		return fmt.Errorf("client: tls_fragment must be off, tcp, record or both, got %q", c.TLSFragment)
 	}
 	if !carrier.ValidFingerprint(c.TLSFingerprint) {
 		return fmt.Errorf("client: tls_fingerprint must be one of %s, got %q", strings.Join(carrier.FingerprintNames(), ", "), c.TLSFingerprint)
@@ -417,6 +452,14 @@ func (f *ClientFile) validate() error {
 	if err := checkDrain("client", c.DrainTimeout); err != nil {
 		return err
 	}
+	if err := checkPadding("client", c.Padding); err != nil {
+		return err
+	}
+	if c.SessionAge != "" && c.SessionAge != "auto" && c.SessionAge != "off" {
+		if d, err := time.ParseDuration(c.SessionAge); err != nil || d < time.Minute {
+			return fmt.Errorf("client: session_age must be auto, off or a duration of at least 1m, got %q", c.SessionAge)
+		}
+	}
 	if c.MaxStreamsPerSession < 1 {
 		return errors.New("client: max_streams_per_session must be >= 1")
 	}
@@ -427,6 +470,15 @@ func (f *ClientFile) validate() error {
 		return fmt.Errorf("client: %w", err)
 	}
 	return nil
+}
+
+// checkPadding validates the padding key (empty means the default, light).
+func checkPadding(who, v string) error {
+	switch v {
+	case "", "off", "light", "strong":
+		return nil
+	}
+	return fmt.Errorf("%s: padding must be off, light or strong, got %q", who, v)
 }
 
 // checkDrain validates drain_timeout: empty or a duration from 0s to 5m.

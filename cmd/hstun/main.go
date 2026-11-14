@@ -7,12 +7,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"hstun/internal/auth"
 	"hstun/internal/client"
@@ -28,6 +31,7 @@ func usage() {
   hstun check  -config FILE     validate a server or client config (-mode server|client)
   hstun server -config FILE     run the tunnel server (listening side)
   hstun client -config FILE     run the tunnel client (dialing side)
+  hstun probe  -config FILE     measure the path to the exit (carrier, fingerprint, sizes, soak, speed)
   hstun version
 `)
 	os.Exit(2)
@@ -46,6 +50,8 @@ func main() {
 		runServer(os.Args[2:])
 	case "client":
 		runClient(os.Args[2:])
+	case "probe":
+		runProbe(os.Args[2:])
 	case "version":
 		fmt.Println("hstun", version)
 	default:
@@ -172,4 +178,78 @@ func runClient(args []string) {
 		fatal(err)
 	}
 	c.Run(stopContext())
+}
+
+// runProbe dials one carrier session with the chosen carrier and TLS fingerprint and
+// measures it: escalating echo sizes, an idle gap, a soak, bulk speed each way.
+// The exit must be 0.5.0 or later with probes on; an older exit only gets the
+// handshake and forward-stream check. Prints one JSON object with -json.
+func runProbe(args []string) {
+	fs := flag.NewFlagSet("probe", flag.ExitOnError)
+	path := fs.String("config", "", "client config file (an entry)")
+	car := fs.String("carrier", "", "ws, http or chunk (default: the config's carrier; auto means ws)")
+	fp := fs.String("fingerprint", "", "tls_fingerprint to use (default: the config's)")
+	frag := fs.String("fragment", "", "tls_fragment to use (default: the config's)")
+	soak := fs.Duration("soak", 20*time.Second, "one small echo per second for this long (0 = skip)")
+	idle := fs.Duration("idle", 10*time.Second, "quiet time before one more echo (0 = skip)")
+	bulk := fs.Int("bulk", 4<<20, "bytes moved each way for the speed figure (0 = skip)")
+	asJSON := fs.Bool("json", false, "print one JSON object")
+	_ = fs.Parse(args)
+	if *path == "" {
+		fatal(fmt.Errorf("probe needs -config"))
+	}
+	cfg, err := config.LoadClient(*path)
+	if err != nil {
+		fatal(err)
+	}
+	carrierName := *car
+	if carrierName == "" {
+		carrierName = cfg.Client.Carrier
+	}
+	if carrierName == "auto" {
+		carrierName = "ws"
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	res := client.Probe(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), client.ProbeOptions{
+		Carrier: carrierName, Fingerprint: *fp, Fragment: *frag,
+		Idle: *idle, Soak: *soak, BulkDown: *bulk, BulkUp: *bulk,
+	})
+	if *asJSON {
+		_ = json.NewEncoder(os.Stdout).Encode(res)
+	} else {
+		printProbe(res)
+	}
+	if res.Verdict != "ok" {
+		os.Exit(1)
+	}
+}
+
+func printProbe(r client.ProbeResult) {
+	fmt.Printf("carrier %s, fingerprint %s, fragment %s: %s (%.0f s)\n", r.Carrier, r.Fingerprint, r.Fragment, r.Verdict, r.Seconds)
+	if !r.Connected {
+		fmt.Println("  no session:", r.Error)
+		return
+	}
+	fmt.Printf("  session up in %.0f ms\n", r.ConnectMs)
+	if !r.ExitProbe {
+		fmt.Printf("  the exit does not answer probe streams (older than 0.5.0, or disable_probe); forward stream opens: %v\n", r.ForwardOK)
+		return
+	}
+	for _, s := range r.Steps {
+		if s.OK {
+			fmt.Printf("  echo %7d bytes ok   %7.0f ms\n", s.Bytes, s.Ms)
+		} else {
+			fmt.Printf("  echo %7d bytes FAIL %s\n", s.Bytes, s.Err)
+		}
+	}
+	if r.IdleOK != nil {
+		fmt.Printf("  after the idle gap: %v\n", *r.IdleOK)
+	}
+	if r.SoakSent > 0 {
+		fmt.Printf("  soak: %d sent, %d lost, median %.0f ms\n", r.SoakSent, r.SoakLost, r.SoakP50Ms)
+	}
+	if r.DownMbit > 0 || r.UpMbit > 0 {
+		fmt.Printf("  speed: down %.1f Mbit/s, up %.1f Mbit/s\n", r.DownMbit, r.UpMbit)
+	}
 }

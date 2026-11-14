@@ -10,12 +10,14 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hstun/internal/auth"
@@ -85,11 +87,12 @@ func New(cfg *config.ClientFile, logger *slog.Logger) (*Client, error) {
 		opts: carrier.Options{
 			Server: cfg.Client.Server, Connect: cfg.Client.Connect, SNI: sni,
 			WSPath: cfg.Client.WSPath, HTTPPath: cfg.Client.HTTPPath, TLS: tc, UserAgent: cfg.Client.UserAgent,
-			Fingerprint: cfg.Client.TLSFingerprint,
-			ChunkUp:     cfg.Client.ChunkUpBytes,
-			ChunkDown:   cfg.Client.ChunkDownBytes, ChunkPar: cfg.Client.ChunkParallel,
+			Fingerprint: cfg.Client.TLSFingerprint, Fragment: cfg.Client.TLSFragment,
+			ChunkUp:   cfg.Client.ChunkUpBytes,
+			ChunkDown: cfg.Client.ChunkDownBytes, ChunkPar: cfg.Client.ChunkParallel,
 		},
 	}
+	c.opts.Tuning = carrier.NewChunkTuning(min(orInt(cfg.Client.ChunkUpBytes, httpmode.DefaultChunkUp), 64<<10), min(orInt(cfg.Client.ChunkDownBytes, httpmode.DefaultChunkDown), 128<<10))
 	order := []string{cfg.Client.Carrier}
 	if cfg.Client.Carrier == "auto" {
 		order = defaultAutoOrder
@@ -103,6 +106,7 @@ func New(cfg *config.ClientFile, logger *slog.Logger) (*Client, error) {
 		c.entry = entry.New(c.hub, logger, idle, cfg.Forward, cfg.Socks, cfg.Client.ForwardMaxConnsPerIP)
 	} else {
 		c.exit = exit.New(cfg.Forward, cfg.SocksExit, idle, cfg.Client.MaxStreamsPerSession)
+		c.exit.SetProbe(!cfg.Client.DisableProbe)
 	}
 	return c, nil
 }
@@ -213,12 +217,23 @@ func (c *Client) slot(ctx, hard context.Context, i int) {
 	for ctx.Err() == nil {
 		start := time.Now()
 		name, _ := c.pick.current()
-		up, err := c.session(hard, i)
+		up, err := c.session(hard, i, name)
 		if ctx.Err() != nil {
 			return
 		}
-		if c.pick.auto() {
-			if c.pick.report(name, up) {
+		if errors.Is(err, errRotated) { // planned replacement of an old session: dial the next at once
+			backoff = time.Second
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
+		// A carrier counts as working only after its session stayed up for autoSoak (the
+		// session reports that itself); one that dies sooner counts against it.
+		if c.pick.auto() && (!up || time.Since(start) < autoSoak()) {
+			if c.pick.report(name, false) {
 				backoff = time.Second // fresh start on the new carrier
 			}
 		}
@@ -236,6 +251,22 @@ func (c *Client) slot(ctx, hard context.Context, i int) {
 			backoff *= 2
 		}
 	}
+}
+
+// errRotated is what session returns when it ended the old session on purpose.
+var errRotated = errors.New("session rotated")
+
+// sessionAge is how long the next session on this carrier should live (0 = for ever).
+func (c *Client) sessionAge(carrierName string) time.Duration {
+	v := c.cfg.Client.SessionAge
+	if v == "off" || carrierName == "chunk" || c.cfg.Client.Conns < 2 {
+		return 0
+	}
+	if v == "" || v == "auto" {
+		return 10*time.Minute + time.Duration(rand.Int64N(int64(30*time.Minute)))
+	}
+	d, _ := time.ParseDuration(v)
+	return time.Duration(float64(d) * (0.75 + 0.5*rand.Float64()))
 }
 
 // staggerDelay is how long slot i waits before its first dial: nothing for
@@ -258,7 +289,7 @@ func errString(err error) string {
 
 // dialCarrier opens one carrier session, runs the handshake and seals the
 // stream with the session key.
-func (c *Client) dialCarrier(ctx context.Context, name string) (net.Conn, error) {
+func (c *Client) dialCarrier(ctx context.Context, name string) (seal.Conn, error) {
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	var conn net.Conn
@@ -289,24 +320,29 @@ func (c *Client) dialCarrier(ctx context.Context, name string) (net.Conn, error)
 		_ = conn.Close()
 		return nil, err
 	}
+	pad := c.cfg.Client.Padding
+	if pad == "" {
+		pad = seal.PadLight
+	}
+	sealed.SetPadding(pad)
 	return sealed, nil
 }
 
-// session runs one carrier session on the carrier the picker names. up is
-// true when the session got established (so the attempt counts as a success).
-func (c *Client) session(ctx context.Context, slot int) (up bool, err error) {
-	name, changed := c.pick.current()
+// session runs one carrier session on the carrier the picker named. up is
+// true when the session got established.
+func (c *Client) session(ctx context.Context, slot int, name string) (up bool, err error) {
+	_, changed := c.pick.current()
 	conn, err := c.dialCarrier(ctx, name)
 	if err != nil {
 		return false, err
 	}
-	defer conn.Close()
 	var mopts []mux.Option
 	if carrierID(name) == proto.CarrierHTTP {
 		mopts = append(mopts, mux.SlowCarrier())
 	}
 	ms, err := mux.Dialer(conn, c.ping, mopts...)
 	if err != nil {
+		_ = conn.Close()
 		return false, err
 	}
 	role := c.cfg.Client.Role
@@ -320,25 +356,79 @@ func (c *Client) session(ctx context.Context, slot int) (up bool, err error) {
 		case <-ms.CloseChan():
 		}
 	}()
-	if c.exit != nil {
-		return true, c.exit.Serve(ctx, ms)
+	if c.pick.auto() {
+		go func() { // the carrier counts as working once the session has stayed up
+			t := time.NewTimer(autoSoak())
+			defer t.Stop()
+			select {
+			case <-t.C:
+				if !ms.IsClosed() {
+					c.pick.report(name, true)
+				}
+			case <-ms.CloseChan():
+			}
+		}()
 	}
-	sess := &entry.Session{
-		Name: c.cfg.Client.Name, Carrier: carrierID(name),
-		IP: c.cfg.Client.Server, Since: time.Now(), Mux: ms,
-	}
-	if err := c.hub.Add(sess); err != nil {
-		return true, err
-	}
-	defer c.hub.Remove(sess)
-	// An entry never serves streams; refuse any the server opens.
-	for {
-		st, err := ms.AcceptStream()
-		if err != nil {
-			return true, err
+	var draining atomic.Bool
+	var sessRef atomic.Pointer[entry.Session]            // the hub entry of an entry-role session
+	onCaps := func(string) { conn.SetPeerPadding(true) } // the peer announced that it reads padding
+	mux.Announce(ms)
+	done := make(chan error, 1)
+	go func() {
+		if c.exit != nil {
+			done <- c.exit.ServeLimited(ctx, ms, func() bool { return !draining.Load() }, onCaps)
+			return
 		}
-		_ = st.Close()
+		sess := &entry.Session{
+			Name: c.cfg.Client.Name, Carrier: carrierID(name),
+			IP: c.cfg.Client.Server, Since: time.Now(), Mux: ms,
+		}
+		if err := c.hub.Add(sess); err != nil {
+			done <- err
+			return
+		}
+		defer c.hub.Remove(sess)
+		sessRef.Store(sess)
+		// An entry never serves streams; refuse any the server opens.
+		mux.Refuse(ms, onCaps)
+		done <- errors.New("session closed")
+	}()
+	var rotate <-chan time.Time
+	if age := c.sessionAge(name); age > 0 {
+		t := time.NewTimer(age)
+		defer t.Stop()
+		rotate = t.C
 	}
+	select {
+	case err := <-done:
+		_ = conn.Close()
+		return true, err
+	case <-rotate:
+	}
+	// Planned replacement: stop taking new streams here, let the ones running finish.
+	c.log.Info("replacing an old session", "slot", slot, "carrier", name)
+	draining.Store(true)
+	if s := sessRef.Load(); s != nil {
+		s.Draining.Store(true) // the hub stops picking it for new streams
+	}
+	go func() {
+		grace := time.NewTimer(2 * time.Minute)
+		defer grace.Stop()
+		for ms.NumStreams() > 0 {
+			select {
+			case <-grace.C:
+				_ = ms.Close()
+			case <-ms.CloseChan():
+			case <-time.After(500 * time.Millisecond):
+				continue
+			}
+			break
+		}
+		_ = ms.Close()
+		<-done
+		_ = conn.Close()
+	}()
+	return true, errRotated
 }
 
 // probeLoop, while the client sits on a carrier that is not the first choice,
@@ -400,3 +490,10 @@ func (c *Client) serveAdmin(ctx context.Context, addr string) {
 func (c *Client) OpenForTest(name string) (net.Conn, byte, error) { return c.entry.OpenForTest(name) }
 
 func currentName(p *picker) string { n, _ := p.current(); return n }
+
+func orInt(v, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return v
+}

@@ -21,6 +21,9 @@ tls_fingerprint = "chrome"             # ClientHello: chrome | chrome_nopq | fir
 ping        = "25s"
 idle_timeout = "10m"
 # drain_timeout = "10s"                    # how long a stopping client lets streams in flight finish (0s = at once)
+# padding = "light"                       # off | light | strong
+# tls_fragment = "off"                   # off | tcp | record | both: split the first TLS record (defeats first-packet SNI filters)
+# session_age = "auto"                   # auto (10-40 min) | off | 30m: replace sessions on a timer (needs conns >= 2)
 
 [[forward]]
 name   = "x1"

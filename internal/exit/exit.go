@@ -6,9 +6,12 @@ package exit
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -30,6 +33,7 @@ type Exit struct {
 	dialer  net.Dialer
 	lookup  func(ctx context.Context, host string) ([]net.IP, error)
 
+	noProbe  bool         // refuse KindProbe streams
 	active   atomic.Int64 // streams being served
 	draining atomic.Bool  // refuse new streams (shutdown in progress)
 }
@@ -65,7 +69,7 @@ func New(forwards []config.Forward, se config.SocksExit, idle time.Duration, max
 }
 
 // Handle serves one stream the entry opened and closes it when done.
-func (x *Exit) Handle(ctx context.Context, st net.Conn) {
+func (x *Exit) Handle(ctx context.Context, st net.Conn, onCaps func(string)) {
 	_ = st.SetReadDeadline(time.Now().Add(5 * time.Second))
 	hdr, err := proto.ReadOpen(st)
 	if err != nil {
@@ -73,6 +77,14 @@ func (x *Exit) Handle(ctx context.Context, st net.Conn) {
 		return
 	}
 	_ = st.SetReadDeadline(time.Time{})
+	if hdr.Kind == proto.KindCaps {
+		mux.HandleCaps(st, hdr, onCaps)
+		return
+	}
+	if hdr.Kind == proto.KindProbe {
+		x.serveProbe(st, hdr.Payload)
+		return
+	}
 	var target net.Conn
 	var code byte
 	switch hdr.Kind {
@@ -232,6 +244,57 @@ func allZero(b []byte) bool {
 	return true
 }
 
+// SetProbe turns the measuring streams of `hstun probe` on or off (on by default).
+func (x *Exit) SetProbe(on bool) { x.noProbe = !on }
+
+// maxProbeBytes caps what one probe stream may move.
+const maxProbeBytes = 64 << 20
+
+// serveProbe answers a measuring stream. Only an authenticated entry can open one.
+//
+//	echo       send back everything received (latency, soak, size escalation)
+//	source:N   send N bytes (download speed)
+//	sink       read until the end, answer with the byte count (upload speed)
+func (x *Exit) serveProbe(st net.Conn, payload string) {
+	defer st.Close()
+	if x.noProbe {
+		_ = proto.WriteReply(st, proto.ReplyNotAllowed)
+		return
+	}
+	_ = st.SetDeadline(time.Now().Add(10 * time.Minute))
+	switch {
+	case payload == "echo":
+		_ = proto.WriteReply(st, proto.ReplyOK)
+		_, _ = io.Copy(st, io.LimitReader(st, maxProbeBytes))
+	case strings.HasPrefix(payload, "source:"):
+		n, err := strconv.ParseInt(strings.TrimPrefix(payload, "source:"), 10, 64)
+		if err != nil || n < 1 || n > maxProbeBytes {
+			_ = proto.WriteReply(st, proto.ReplyFailure)
+			return
+		}
+		_ = proto.WriteReply(st, proto.ReplyOK)
+		buf := make([]byte, 32<<10)
+		for i := range buf {
+			buf[i] = byte(i*7 + 13)
+		}
+		for n > 0 {
+			k := min(int64(len(buf)), n)
+			if _, err := st.Write(buf[:k]); err != nil {
+				return
+			}
+			n -= k
+		}
+	case payload == "sink":
+		_ = proto.WriteReply(st, proto.ReplyOK)
+		got, _ := io.Copy(io.Discard, io.LimitReader(st, maxProbeBytes))
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], uint64(got))
+		_, _ = st.Write(b[:])
+	default:
+		_ = proto.WriteReply(st, proto.ReplyFailure)
+	}
+}
+
 // Active is the number of streams being served right now.
 func (x *Exit) Active() int { return int(x.active.Load()) }
 
@@ -240,13 +303,13 @@ func (x *Exit) Drain() { x.draining.Store(true) }
 
 // Serve accepts streams on the session until it ends.
 func (x *Exit) Serve(ctx context.Context, ms *yamux.Session) error {
-	return x.ServeLimited(ctx, ms, nil)
+	return x.ServeLimited(ctx, ms, nil, nil)
 }
 
 // ServeLimited is Serve with a gate: when allow is not nil, a new stream is
 // refused (reset) unless allow returns true. The server uses it for the
-// per-key rate of new streams.
-func (x *Exit) ServeLimited(ctx context.Context, ms *yamux.Session, allow func() bool) error {
+// per-key rate of new streams. onCaps hears the peer's capability announcement.
+func (x *Exit) ServeLimited(ctx context.Context, ms *yamux.Session, allow func() bool, onCaps func(string)) error {
 	var sem chan struct{}
 	if x.maxStr > 0 {
 		sem = make(chan struct{}, x.maxStr)
@@ -274,7 +337,7 @@ func (x *Exit) ServeLimited(ctx context.Context, ms *yamux.Session, allow func()
 			if sem != nil {
 				defer func() { <-sem }()
 			}
-			x.Handle(ctx, mux.Stream{Stream: st})
+			x.Handle(ctx, mux.Stream{Stream: st}, onCaps)
 		}()
 	}
 }

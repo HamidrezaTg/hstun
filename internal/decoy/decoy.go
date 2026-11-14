@@ -48,6 +48,37 @@ func NotFound(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(notFoundPage))
 }
 
+// Error writes an error status with a page in the same style as the 404 page, for
+// the answers the http carrier gives its own client (busy, gone, bad request). A
+// plain-text "gone" or "tag" would be a signature of the tool; this looks like a
+// small web server's error page. The status code is still the signal the client reads.
+func Error(w http.ResponseWriter, code int) {
+	if code == http.StatusNotFound {
+		setHTML(w)
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(notFoundPage))
+		return
+	}
+	text := http.StatusText(code)
+	setHTML(w)
+	w.WriteHeader(code)
+	_, _ = w.Write([]byte("<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>" + strings.TrimSpace(itoa(code)+" "+text) +
+		"</title></head>\n<body>\n<h1>" + text + "</h1>\n<p>The server could not complete the request.</p>\n</body>\n</html>\n"))
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [8]byte
+	i := len(b)
+	for ; n > 0; n /= 10 {
+		i--
+		b[i] = byte('0' + n%10)
+	}
+	return string(b[i:])
+}
+
 // Handler serves dir (a static site) or, when dir is empty, a built-in index
 // page at "/". Directory listings are never produced, dot files are hidden,
 // and only GET and HEAD are served; everything else is NotFound.

@@ -42,6 +42,17 @@ Per-key limits and stopping (server; `0` = off):
 | `max_new_streams_per_sec_per_key` | off | exit role: how many new streams the key may open per second (a burst of twice that, at least 10, is allowed). Over the rate the exit resets the stream, the entry fails that one connection; `/stats` counts `streams_throttled` |
 | `drain_timeout` | `10s` | how long a stopping process lets the streams in flight finish. See "Stopping" in [operations](operations.md). `0s` stops at once; also a key of `[client]` |
 
+Traffic shaping (see [security](security.md) and [stealth plan](stealth-plan.md)); the first three apply to the client, `padding` to both ends:
+
+| key | default | meaning |
+|---|---|---|
+| `padding` | `light` | `off`, `light` (small records get 0-400 random bytes) or `strong` (the first 16 records look like 900-1400 byte ones, small ones get more). Used only when the peer announced that it reads padding, so a 0.4 or older peer sees no change; keepalives also carry a random-size filler |
+| `tls_fragment` | `off` | `tcp` (the first TLS record leaves as small TCP segments a few ms apart), `record` (re-framed as several TLS records), `both`. Defeats filters that read only the first packet; adds a few ms per connection |
+| `session_age` | `auto` | replace a carrier session on a timer: `auto` is a random 10-40 minutes, `off`, or a duration (varied by +-25 %, at least 1m). The old session takes no new streams, finishes its own (up to 2 minutes), then closes. Needs `conns` of 2 or more; ignored by the chunk carrier |
+| `disable_probe` | `false` | exit role: refuse the measuring streams `hstun probe` opens |
+
+The mux keepalive interval is varied by +-40 % (never above 55 s), and the http carrier sends its session id and sequence numbers in cookies named from the secret `http_path`, not in `X-Hs-*` headers (a client or server that predates this still works with a new one).
+
 These are per *key*, so with several entries that each have their own secret (several `secret_files`), one noisy entry cannot starve the others.
 
 Client (`deploy/client.example.toml`): `role`, `server`, optional `connect` (dial an IP

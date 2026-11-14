@@ -209,7 +209,7 @@ NAME=""
 ROLE="" MODE="" FORWARD_TARGET="" PORT="" DOMAIN="" CERT="" KEY="" ACME="" EMAIL="" ALLOW_FROM="" DECOY_DIR="" BACKEND_PORT=""
 JOIN="" JOIN_SECRET="" NO_SECRET=0 SERVER="" CARRIER="" WS_PATH="" HTTP_PATH="" SECRET_FILE="" SECRET_FROM="" TLS_VERIFY="" SPKI="" CONNECT="" SNI=""
 FORWARD_LISTEN="" FORWARD_NAME="" CONNS="" CHUNK_PARALLEL="" SOCKS_LISTEN="" NO_FW="" ADMIN_PORT="" SELF_SIGNED="" PUBLIC_ADDR=""
-MAX_MBIT="" MAX_NEW_STREAMS="" DRAIN_TIMEOUT="" TLS_FINGERPRINT=""
+MAX_MBIT="" MAX_NEW_STREAMS="" DRAIN_TIMEOUT="" TLS_FINGERPRINT="" PADDING="" TLS_FRAGMENT="" SESSION_AGE="" MATRIX=0 QUICK=0
 FOLLOW=0 PURGE=0 ALL=0 IPV6="" FINISH=0 SECRET_OVERRIDE="" EDIT_MODE=0 FILE="" FILE_TEST=0 FORCE=0 RECONFIGURE=0 REINSTALL=0 NEW_CERT=0 CUSTOMIZE=0 SKIP_LOAD="" DRY_RUN=0 ADOPT_ONLY=""
 ADOPTED="" ADOPT_UNITS="" ADOPT_BIN=""
 
@@ -220,7 +220,7 @@ set_paths() {
 }
 CONF_KEYS=(ROLE MODE FORWARD_TARGET PORT DOMAIN CERT KEY BACKEND_PORT ADMIN_PORT WS_PATH HTTP_PATH SERVER CARRIER TLS_VERIFY SPKI CONNECT SNI
   FORWARD_LISTEN FORWARD_NAME CONNS CHUNK_PARALLEL SOCKS_LISTEN ALLOW_FROM PUBLIC_ADDR FW_PORTS CONNLIMIT_PORT SELF_SIGNED
-  ADOPTED ADOPT_UNITS ADOPT_BIN IPV6 MAX_MBIT MAX_NEW_STREAMS DRAIN_TIMEOUT TLS_FINGERPRINT)
+  ADOPTED ADOPT_UNITS ADOPT_BIN IPV6 MAX_MBIT MAX_NEW_STREAMS DRAIN_TIMEOUT TLS_FINGERPRINT PADDING TLS_FRAGMENT SESSION_AGE)
 FW_PORTS="" CONNLIMIT_PORT=""
 load_conf() { # saved values only fill what is still empty (flags win)
   [ -f "$ETC/install.conf" ] || return 0
@@ -562,6 +562,9 @@ check_limits() { # --max-mbit, --max-new-streams and --drain-timeout, whichever 
   case "$MAX_MBIT" in "") ;; *[!0-9.]* | . | *.*.*) die "--max-mbit must be a number (megabits per second, 0 = no limit)" ;; esac
   case "$MAX_NEW_STREAMS" in "") ;; *[!0-9]*) die "--max-new-streams must be a whole number (new streams per second, 0 = no limit)" ;; esac
   case "$DRAIN_TIMEOUT" in "" | [0-9]*s | [0-9]*m) ;; *) die "--drain-timeout must look like 10s or 1m (0s = stop at once)" ;; esac
+  case "$PADDING" in "" | off | light | strong) ;; *) die "--padding must be off, light or strong" ;; esac
+  case "$TLS_FRAGMENT" in "" | off | tcp | record | both) ;; *) die "--tls-fragment must be off, tcp, record or both" ;; esac
+  case "$SESSION_AGE" in "" | auto | off | [0-9]*m | [0-9]*h) ;; *) die "--session-age must be auto, off, or a duration like 30m or 2h (at least 1m)" ;; esac
   case "$TLS_FINGERPRINT" in "" | go | chrome | chrome_nopq | firefox | safari | ios | android) ;; *) die "--tls-fingerprint must be chrome, chrome_nopq, firefox, safari, ios, android or go" ;; esac
 }
 render_server_toml() {
@@ -572,6 +575,8 @@ render_server_toml() {
   [ -n "$MAX_NEW_STREAMS" ] && lim="${lim}max_new_streams_per_sec_per_key = $MAX_NEW_STREAMS
 "
   [ -n "$DRAIN_TIMEOUT" ] && lim="${lim}drain_timeout = \"$DRAIN_TIMEOUT\"
+"
+  [ -n "$PADDING" ] && lim="${lim}padding = \"$PADDING\"
 "
   case "$MODE" in
     nginx) listen="127.0.0.1:$BACKEND_PORT"; trust='trust_proxy  = "loopback"' ;;
@@ -622,6 +627,12 @@ render_client_toml() {
   local verify="tls_verify  = \"system\"" conn="" sni="" socks="" ch="" drain="" fp="" conns=$CONNS
   check_limits
   [ -n "$TLS_FINGERPRINT" ] && fp="tls_fingerprint = \"$TLS_FINGERPRINT\""
+  [ -n "$TLS_FRAGMENT" ] && fp="${fp}
+tls_fragment = \"$TLS_FRAGMENT\""
+  [ -n "$PADDING" ] && fp="${fp}
+padding = \"$PADDING\""
+  [ -n "$SESSION_AGE" ] && fp="${fp}
+session_age = \"$SESSION_AGE\""
   [ -n "$DRAIN_TIMEOUT" ] && drain="drain_timeout = \"$DRAIN_TIMEOUT\""
   [ "$TLS_VERIFY" = spki ] && verify="tls_verify  = \"spki\"
 spki_sha256 = \"$SPKI\""
@@ -1298,8 +1309,47 @@ tcp_ok() { # host port [seconds]
   for i in $(seq 1 "${3:-5}"); do kill -0 "$pid" 2>/dev/null || { wait "$pid"; return; }; sleep 1; done
   kill "$pid" 2>/dev/null; return 1
 }
+cmd_test_matrix() { # entry: every carrier x TLS fingerprint through `hstun probe`, with a verdict per row
+  [ "$ROLE" = entry ] || die "the matrix runs on the entry host (the restricted side), where the path to the exit is"
+  have jq || die "the matrix needs jq"
+  local bin cfg server soak=20 idle=10 bulk=4194304 c f out v ms dn up sl line best="" bestv=0 any=0
+  bin=$(inst_bin); cfg=$ETC/client.toml
+  "$bin" probe -h 2>&1 | grep -q -- '-carrier' || die "this hstun ($("$bin" version 2>/dev/null)) has no probe command: run hstun-ctl update first"
+  if [ "$QUICK" = 1 ]; then soak=5; idle=3; bulk=1048576; fi
+  server=$(sed -n 's/^server *= *"\(.*\)"/\1/p' "$cfg" | head -1)
+  echo "Path matrix for ${NAME:-default}: $server (soak ${soak}s, idle gap ${idle}s, ${bulk} bytes each way)"
+  echo "This opens extra tunnel sessions for a few minutes; the running tunnel is not touched."
+  printf '%-7s %-12s %-9s %9s %9s %9s  %s\n' carrier fingerprint verdict "connect" "down" "up" "notes"
+  for c in ${HSTUN_MATRIX_CARRIERS:-ws http chunk}; do # the variables narrow the matrix (tests)
+    for f in ${HSTUN_MATRIX_FPS:-go chrome chrome_nopq firefox}; do
+      out=$("$bin" probe -config "$cfg" -carrier "$c" -fingerprint "$f" -soak "${soak}s" -idle "${idle}s" -bulk "$bulk" -json 2>/dev/null) || true
+      if [ -z "$out" ]; then printf '%-7s %-12s %-9s\n' "$c" "$f" "error"; continue; fi
+      v=$(printf '%s' "$out" | jq -r '.verdict'); ms=$(printf '%s' "$out" | jq -r '.connect_ms|floor')
+      dn=$(printf '%s' "$out" | jq -r '.down_mbit // 0|.*10|floor|./10'); up=$(printf '%s' "$out" | jq -r '.up_mbit // 0|.*10|floor|./10')
+      sl=$(printf '%s' "$out" | jq -r 'if .exit_probe then ([.steps[]|select(.ok|not)|.bytes]|first // empty) as $b | (if $b then "fails at \($b) bytes; " else "" end) + (if .soak_sent>0 then "soak lost \(.soak_lost)/\(.soak_sent)" else "" end) elif .connected then "exit has no probe streams (older than 0.5.0)" else (.error // "") end')
+      printf '%-7s %-12s %-9s %7s ms %6s Mb %6s Mb  %s\n' "$c" "$f" "$v" "$ms" "$dn" "$up" "$sl"
+      if [ "$v" = ok ]; then
+        any=1
+        # downloads decide the ranking: users download far more than they upload
+        if awk -v a="$dn" -v b="$bestv" 'BEGIN{exit !(a>b)}'; then best="$c $f"; bestv=$dn; fi
+      fi
+    done
+  done
+  # what a stranger sees on the same port: the front page and a path nobody has
+  line=$(curl -sk -m 8 -o /dev/null -w '%{http_code}' "https://$server/" 2>/dev/null || echo "-")
+  out=$(curl -sk -m 8 -o /dev/null -w '%{http_code}' "https://$server/$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')" 2>/dev/null || echo "-")
+  echo "A stranger on $server sees: / -> $line, a random path -> $out (both should look like an ordinary website)"
+  if [ "$any" = 1 ]; then
+    echo "Best working row by download speed: carrier ${best% *}, fingerprint ${best#* }."
+    echo "Use it with: hstun-ctl edit --carrier ${best% *} --tls-fingerprint ${best#* }"
+  else
+    echo "No row worked: the path to the exit is blocked or the exit is down. Try hstun-ctl doctor."
+    return 1
+  fi
+}
 cmd_test() { # end-to-end check of one instance: unit, sessions, and a stream through to the exit's target
   set_paths; need_installed
+  if [ "$MATRIX" = 1 ]; then cmd_test_matrix; return; fi
   CHK_FAIL=0
   echo "Testing instance ${NAME:-default} ($ROLE)"
   local u n
@@ -1724,11 +1774,15 @@ Exit:      --mode nginx|direct|cloudflared   --forward-target HOST:PORT   --port
 Entry:     --join STRING   --server HOST:PORT   --carrier ws|http|chunk|auto   --ws-path P   --http-path P
            --secret-file FILE | --secret-from USER@HOST[:SSHPORT]   --tls-verify system|spki   --spki HEX
            --tls-fingerprint chrome|chrome_nopq|firefox|safari|ios|android|go (ClientHello the entry sends; default chrome)
+           --tls-fragment off|tcp|record|both (split the first TLS record, defeats filters that read only the first packet)
+           --session-age auto|off|30m (replace carrier sessions on a timer; entry, needs --conns 2 or more)
+           --padding off|light|strong (random filler on small records; both ends; default light)
            --connect IP:PORT   --sni NAME   --forward-listen ADDR:PORT   --forward-name NAME   --conns N
            --chunk-parallel N   --socks ADDR:PORT
 Limits:    --max-mbit N (exit: megabits per second per key, each direction)   --max-new-streams N (exit: new streams per second per key)
            --drain-timeout 10s (both: how long a stopping service lets connections in flight finish)
 Install:   --reconfigure (change an installed instance)   --reinstall (new certificate, secret, paths)   --new-cert   --customize (entry: ask the advanced questions)
+Test:      test --matrix [--quick]   (entry) try every carrier x TLS fingerprint with echo sizes, an idle gap, a soak and speeds
 Manage:    --force (update even when current)   --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)   --file FILE, --test (backup/restore)   --ipv6 / --no-ipv6 (exit listens on IPv6 too; default: detected)   --no-secret (show-join)
 
 Environment: GITHUB_TOKEN (private repository), HSTUN_REPO, HSTUN_VERSION, HSTUN_TARBALL=FILE (offline), HSTUN_BUILD=1 (build from source).
@@ -1775,6 +1829,11 @@ while [ $# -gt 0 ]; do
     --chunk-parallel) CHUNK_PARALLEL=$2; shift ;;
     --socks) SOCKS_LISTEN=$2; shift ;;
     --tls-fingerprint) TLS_FINGERPRINT=$2; shift ;;
+    --tls-fragment) TLS_FRAGMENT=$2; shift ;;
+    --padding) PADDING=$2; shift ;;
+    --session-age) SESSION_AGE=$2; shift ;;
+    --matrix) MATRIX=1 ;;
+    --quick) QUICK=1 ;;
     --max-mbit) MAX_MBIT=$2; shift ;;
     --max-new-streams) MAX_NEW_STREAMS=$2; shift ;;
     --drain-timeout) DRAIN_TIMEOUT=$2; shift ;;

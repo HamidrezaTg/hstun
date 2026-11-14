@@ -94,6 +94,8 @@ Useful flags: `--carrier ws|http|chunk` (`chunk` for a path that cuts long conne
 | `--secret-file FILE`, `--secret-from USER@HOST[:PORT]` | entry | secret from a file, or fetched over ssh (rarely needed; the pair code carries it) |
 | `--reconfigure`, `--reinstall`, `--new-cert`, `--customize` | exit/entry | change an installed instance; start from scratch; new self-signed certificate; ask the advanced questions |
 | `--ipv6`, `--no-ipv6` | exit | listen on IPv6 too (dual-stack) or IPv4 only; default: detected |
+| `--tls-fragment off\|tcp\|record\|both`, `--session-age auto\|off\|30m` | entry | split the first TLS record; replace carrier sessions on a timer (needs `--conns` 2 or more) |
+| `--padding off\|light\|strong` | both | random filler on small records (default light; used when the peer supports it) |
 | `--max-mbit N`, `--max-new-streams N` | exit | per-key limits: megabits per second each direction, new streams per second (0 = off) |
 | `--drain-timeout 10s` | all | how long a stopping service lets connections in flight finish (0s = stop at once) |
 | `--no-firewall` | all | do not touch ufw |

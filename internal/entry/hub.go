@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -30,6 +31,10 @@ type Session struct {
 	IP      string
 	Since   time.Time
 	Mux     *yamux.Session
+	// Padding reports whether the peer announced that it reads padding frames (nil = unknown).
+	Padding func() bool
+	// Draining sessions take no new streams; the ones they have run to the end.
+	Draining atomic.Bool
 }
 
 // Hub tracks live tunnel sessions and opens streams on the least loaded one.
@@ -95,6 +100,7 @@ type SessionInfo struct {
 	IP      string    `json:"ip"`
 	Since   time.Time `json:"since"`
 	Streams int       `json:"streams"`
+	Padding bool      `json:"padding"`
 }
 
 // Snapshot lists live sessions.
@@ -107,7 +113,7 @@ func (h *Hub) Snapshot() []SessionInfo {
 		if s.Carrier == proto.CarrierHTTP {
 			c = "http"
 		}
-		out = append(out, SessionInfo{s.id, s.Name, c, s.IP, s.Since, s.Mux.NumStreams()})
+		out = append(out, SessionInfo{s.id, s.Name, c, s.IP, s.Since, s.Mux.NumStreams(), s.Padding != nil && s.Padding()})
 	}
 	return out
 }
@@ -142,7 +148,7 @@ func (h *Hub) candidates() []*Session {
 	defer h.mu.Unlock()
 	var out []*Session
 	for _, s := range h.sessions {
-		if s.Mux.IsClosed() || s.Mux.NumStreams() >= h.maxStreams {
+		if s.Mux.IsClosed() || s.Draining.Load() || s.Mux.NumStreams() >= h.maxStreams {
 			continue
 		}
 		out = append(out, s)

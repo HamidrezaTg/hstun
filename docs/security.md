@@ -34,6 +34,19 @@ What is done (each has a test):
   application-data records on the wire (checked with packet captures, see the audit report).
 - **Warning at startup** while `ws_path`/`http_path` are still the public defaults.
 
+- **Record sizes and timing.** `padding` adds random filler to small records (negotiated, so older peers are unaffected; the
+  filler is authenticated and written in the same carrier message as a real record, so on the wire it only changes sizes);
+  keepalives come at a varied interval with a random-size filler, not a fixed-size beat every 25 s.
+- **First-packet filters.** `tls_fragment` sends the ClientHello as several TCP segments or TLS records (off by default).
+- **Connection lifetimes.** `session_age` replaces carrier sessions on a random timer, gracefully, so no connection lives for days.
+- **Metadata of the http carrier** travels in cookies named from the secret path, not in `X-Hs-*` headers, and its error
+  answers are HTML pages in the decoy's style, not plain-text words. A test checks both.
+- **Browser-like headers** on the http and WebSocket requests follow the chosen profile (User-Agent, Accept-Language,
+  Sec-CH-UA and Sec-Fetch-* for Chrome profiles). Go's HTTP client sends headers in alphabetical order, which a browser does not;
+  that is only visible after TLS ends (a CDN).
+- **Failover by soak.** `carrier = "auto"` counts a carrier as working only after its session stayed up for 20 seconds, so a path
+  that lets a few packets through and then drops the flow is left, not kept.
+
 What you should do when deploying: use a real domain with a CA-issued certificate (Let's Encrypt)
 instead of a self-signed one, put real content in `decoy_dir`, use your own `ws_path`/`http_path`,
 and use a normal HTTPS port (443 or a port that site would plausibly use). A self-signed
@@ -44,9 +57,10 @@ What is **not** done, on purpose or for lack of a way to do it cleanly:
 - With `tls_fingerprint = "go"` the ClientHello is Go's own, so a JA3/JA4 fingerprint identifies "a Go program".
   The default is a browser profile instead (see below). Only the ClientHello is a browser's: after it the
   handshake and the sealed stream are hstun's, and the server side is Go's `crypto/tls` (or nginx).
-- No padding or timing shaping. The mux keepalive is a small record every `ping` interval, and bulk
-  transfers produce records of the sizes the carriers write. A sophisticated traffic classifier could
-  still separate this from web browsing by volume and timing.
+- Shaping is light. Padding covers small records and the start of a session (`strong`), not bulk transfers; the inner
+  traffic's own shape (an inner TLS handshake in the first records, many parallel streams) still shows through. A sophisticated
+  classifier could still separate this from web browsing by volume and timing. What would help further is listed in
+  [stealth-plan.md](stealth-plan.md) (Vision-style padding of the first packets of each stream, ECH, pinning).
 - The SNI is sent in clear (TLS 1.3 without ECH); choose a hostname you control.
 
 

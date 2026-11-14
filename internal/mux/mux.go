@@ -5,12 +5,15 @@ package mux
 
 import (
 	"io"
+	"math/rand/v2"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/yamux"
 
 	"hstun/internal/netx"
+	"hstun/internal/proto"
 )
 
 // ReadIdle is how long a session may receive nothing at all before it is
@@ -32,10 +35,9 @@ func SlowCarrier() Option {
 func config(keepAlive time.Duration, opts ...Option) *yamux.Config {
 	c := yamux.DefaultConfig()
 	c.AcceptBacklog = 64
-	c.EnableKeepAlive = keepAlive > 0
-	if keepAlive > 0 {
-		c.KeepAliveInterval = keepAlive
-	}
+	// The keepalive is ours (see keepalive): a fixed-period heartbeat is a
+	// pattern a classifier can see, so the interval varies.
+	c.EnableKeepAlive = false
 	c.ConnectionWriteTimeout = 10 * time.Second
 	c.MaxStreamWindowSize = 2 << 20
 	c.StreamOpenTimeout = 10 * time.Second
@@ -56,12 +58,98 @@ func wrap(c net.Conn) net.Conn { return &netx.IdleConn{Conn: c, Idle: ReadIdle} 
 
 // Listener wraps a carrier conn the local side accepted.
 func Listener(c net.Conn, keepAlive time.Duration, opts ...Option) (*yamux.Session, error) {
-	return yamux.Client(wrap(c), config(keepAlive, opts...))
+	s, err := yamux.Client(wrap(c), config(keepAlive, opts...))
+	if err == nil && keepAlive > 0 {
+		go keepalive(s, c, keepAlive)
+	}
+	return s, err
 }
 
 // Dialer wraps a carrier conn the local side dialed.
 func Dialer(c net.Conn, keepAlive time.Duration, opts ...Option) (*yamux.Session, error) {
-	return yamux.Server(wrap(c), config(keepAlive, opts...))
+	s, err := yamux.Server(wrap(c), config(keepAlive, opts...))
+	if err == nil && keepAlive > 0 {
+		go keepalive(s, c, keepAlive)
+	}
+	return s, err
+}
+
+// NextPing is the time to the next keepalive: the base interval varied by
+// +-40 %, never above 55 s (the session is declared dead after 80 s of silence).
+func NextPing(base time.Duration) time.Duration {
+	d := time.Duration(float64(base) * (0.6 + 0.8*rand.Float64()))
+	return min(d, 55*time.Second)
+}
+
+type padWriter interface{ WritePad(n int) error }
+
+// keepalive pings the peer at jittered intervals until the session ends. A ping
+// that gets no answer closes the session. When the connection can send padding
+// frames, each ping travels with a random-size one, so even an idle tunnel has no
+// constant record size.
+func keepalive(s *yamux.Session, c net.Conn, base time.Duration) {
+	pw, _ := c.(padWriter)
+	for {
+		t := time.NewTimer(NextPing(base))
+		select {
+		case <-s.CloseChan():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		if pw != nil {
+			_ = pw.WritePad(rand.IntN(600))
+		}
+		if _, err := s.Ping(); err != nil {
+			_ = s.Close()
+			return
+		}
+	}
+}
+
+// Announce tells the peer, on a stream of its own, what this end can read (padding).
+// An older peer refuses the stream, which is how it says no. It never blocks.
+func Announce(s *yamux.Session) {
+	go func() {
+		st, err := s.OpenStream()
+		if err != nil {
+			return
+		}
+		defer st.Close()
+		_ = st.SetDeadline(time.Now().Add(10 * time.Second))
+		if proto.WriteOpen(st, proto.OpenHeader{Kind: proto.KindCaps, Payload: proto.CapPadding}) == nil {
+			_, _ = proto.ReadReply(st)
+		}
+	}()
+}
+
+// HandleCaps answers a KindCaps stream whose header was already read.
+func HandleCaps(st net.Conn, hdr proto.OpenHeader, onCaps func(payload string)) {
+	if onCaps != nil && strings.Contains(hdr.Payload, proto.CapPadding) {
+		onCaps(hdr.Payload)
+	}
+	_ = proto.WriteReply(st, proto.ReplyOK)
+	_ = st.Close()
+}
+
+// Refuse serves the streams of a peer that is not supposed to open any (an entry
+// serves none): it answers the capability stream and closes the rest.
+func Refuse(s *yamux.Session, onCaps func(payload string)) {
+	for {
+		st, err := s.AcceptStream()
+		if err != nil {
+			return
+		}
+		go func() {
+			_ = st.SetReadDeadline(time.Now().Add(5 * time.Second))
+			hdr, err := proto.ReadOpen(st)
+			if err == nil && hdr.Kind == proto.KindCaps {
+				HandleCaps(st, hdr, onCaps)
+				return
+			}
+			_ = st.Close()
+		}()
+	}
 }
 
 // Stream is a yamux stream that can half-close. yamux's Close only sends a

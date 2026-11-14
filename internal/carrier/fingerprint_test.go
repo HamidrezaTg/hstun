@@ -1,6 +1,7 @@
 package carrier
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -411,5 +412,155 @@ func TestEveryProfileHandshakesAndVerifies(t *testing.T) {
 		if err := dial(Options{TLS: sys, Fingerprint: fp}); err == nil {
 			t.Errorf("%s accepted a self-signed certificate against the system roots", fp)
 		}
+	}
+}
+
+// recordingConn remembers every Write.
+type recordingConn struct {
+	net.Conn
+	writes [][]byte
+}
+
+func (r *recordingConn) Write(p []byte) (int, error) {
+	r.writes = append(r.writes, append([]byte(nil), p...))
+	return len(p), nil
+}
+
+// records splits a byte stream into TLS records.
+func records(b []byte) (types []byte, payloads [][]byte) {
+	for len(b) >= 5 {
+		n := int(binary.BigEndian.Uint16(b[3:5]))
+		if len(b) < 5+n {
+			break
+		}
+		types = append(types, b[0])
+		payloads = append(payloads, b[5:5+n])
+		b = b[5+n:]
+	}
+	return
+}
+
+func sampleHello() []byte {
+	payload := make([]byte, 600)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	rec := []byte{0x16, 0x03, 0x01, byte(len(payload) >> 8), byte(len(payload))}
+	return append(rec, payload...)
+}
+
+func TestFragmentModesKeepThePayloadAndSplitTheHello(t *testing.T) {
+	orig := sampleHello()
+	for _, mode := range []string{"tcp", "record", "both"} {
+		for i := 0; i < 30; i++ { // the split points are random
+			rc := &recordingConn{}
+			c := newFragmentConn(rc, mode)
+			if _, err := c.Write(orig); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Write([]byte("second write goes through untouched")); err != nil {
+				t.Fatal(err)
+			}
+			var all []byte
+			for _, w := range rc.writes[:len(rc.writes)-1] {
+				all = append(all, w...)
+			}
+			types, payloads := records(all)
+			var joined []byte
+			for _, p := range payloads {
+				joined = append(joined, p...)
+			}
+			if !bytes.Equal(joined, orig[5:]) {
+				t.Fatalf("%s: payload changed", mode)
+			}
+			if (mode == "record" || mode == "both") && len(payloads) < 2 {
+				t.Fatalf("%s: still one record", mode)
+			}
+			if mode == "tcp" && (len(payloads) != 1 || len(rc.writes)-1 < 2) {
+				t.Fatalf("tcp: %d records in %d writes, want 1 record in several writes", len(payloads), len(rc.writes)-1)
+			}
+			if mode == "both" && len(rc.writes)-1 < 2 {
+				t.Fatalf("both: one write")
+			}
+			for _, ty := range types {
+				if ty != 0x16 {
+					t.Fatalf("%s: record type %x", mode, ty)
+				}
+			}
+			if string(rc.writes[len(rc.writes)-1]) != "second write goes through untouched" {
+				t.Fatalf("%s: a later write was changed", mode)
+			}
+		}
+	}
+	rc := &recordingConn{}
+	if newFragmentConn(rc, "off") != net.Conn(rc) || newFragmentConn(rc, "") != net.Conn(rc) {
+		t.Fatal("off must not wrap")
+	}
+}
+
+// Fragmented hellos from every profile must still be accepted by a real server,
+// and the SNI must not be readable from the first segment alone.
+func TestFragmentedHandshakeStillCompletes(t *testing.T) {
+	certPath, keyPath := testutil.Cert(t)
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"http/1.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer c.Close(); _, _ = io.Copy(io.Discard, c) }()
+		}
+	}()
+	tc, err := ClientTLS("localhost", "ca_file", certPath, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fp := range []string{"go", "chrome", "chrome_nopq", "firefox"} {
+		for _, mode := range []string{"tcp", "record", "both"} {
+			for i := 0; i < 5; i++ {
+				raw, err := net.Dial("tcp", ln.Addr().String())
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				c, err := (Options{TLS: tc, Fingerprint: fp, Fragment: mode}).Handshake(ctx, raw)
+				cancel()
+				if err != nil {
+					t.Fatalf("%s + %s fragment: %v", fp, mode, err)
+				}
+				c.Close()
+			}
+		}
+	}
+}
+
+func TestChunkTuningShrinksAndGrows(t *testing.T) {
+	tu := NewChunkTuning(12<<10, 32<<10)
+	up, down := tu.Sizes()
+	if up != 12<<10 || down != 32<<10 {
+		t.Fatalf("starts at %d/%d", up, down)
+	}
+	for i := 0; i < 30; i++ {
+		tu.Shrink()
+	}
+	up, down = tu.Sizes()
+	if up != 2<<10 || down != 4<<10 {
+		t.Fatalf("floor is %d/%d, want 2048/4096", up, down)
+	}
+	for i := 0; i < 200; i++ {
+		tu.Grow()
+	}
+	up, down = tu.Sizes()
+	if up != 12<<10 || down != 32<<10 {
+		t.Fatalf("growth must stop at the configured sizes, got %d/%d", up, down)
 	}
 }

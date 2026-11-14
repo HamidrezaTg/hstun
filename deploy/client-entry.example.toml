@@ -18,6 +18,9 @@ tls_fingerprint = "chrome"             # ClientHello: chrome | chrome_nopq | fir
 ping        = "25s"
 idle_timeout = "10m"
 # drain_timeout = "10s"                    # how long a stopping client lets streams in flight finish (0s = at once)
+# padding = "light"                       # off | light | strong
+# tls_fragment = "off"                   # off | tcp | record | both: split the first TLS record (defeats first-packet SNI filters)
+# session_age = "auto"                   # auto (10-40 min) | off | 30m: replace sessions on a timer (needs conns >= 2)
 max_streams_per_session = 256
 forward_max_conns_per_ip = 256           # per-source cap on forward/SOCKS ports (0 = off)
 admin_listen = "127.0.0.1:9110"          # /stats, loopback only

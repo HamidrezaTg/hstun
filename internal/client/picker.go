@@ -3,6 +3,7 @@ package client
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -11,6 +12,15 @@ var (
 	autoFailAfter  = 3                // consecutive failed attempts on the current carrier before moving to the next
 	autoProbeEvery = 10 * time.Minute // how often a better carrier than the current one is tried again
 )
+
+// autoSoak is how long a session must stay up before the carrier counts as
+// working: a carrier that connects and then stalls (a path that lets a few packets
+// through, then drops the flow) must not look healthy. Nanoseconds, atomic: tests change it.
+var autoSoakNs atomic.Int64
+
+func init() { autoSoakNs.Store(int64(20 * time.Second)) }
+
+func autoSoak() time.Duration { return time.Duration(autoSoakNs.Load()) }
 
 // defaultAutoOrder is the order tried by carrier = "auto": the fast WebSocket
 // first, then the long-poll http carrier, then one-connection-per-request chunk.
@@ -91,8 +101,9 @@ func (p *picker) promote(carrier string) {
 
 // SetAutoTiming changes the failover timing and returns a function that
 // restores it. It exists for tests in other packages.
-func SetAutoTiming(failAfter int, probeEvery time.Duration) (restore func()) {
-	oldF, oldP := autoFailAfter, autoProbeEvery
+func SetAutoTiming(failAfter int, probeEvery, soak time.Duration) (restore func()) {
+	oldF, oldP, oldS := autoFailAfter, autoProbeEvery, autoSoak()
 	autoFailAfter, autoProbeEvery = failAfter, probeEvery
-	return func() { autoFailAfter, autoProbeEvery = oldF, oldP }
+	autoSoakNs.Store(int64(soak))
+	return func() { autoFailAfter, autoProbeEvery = oldF, oldP; autoSoakNs.Store(int64(oldS)) }
 }

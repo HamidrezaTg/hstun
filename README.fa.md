@@ -61,6 +61,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/HamidrezaTg/hstun/main/install
 |---|---|
 | `hstun-ctl` | منو: نشان می‌دهد روی این سرور چه نصب است و فقط کارهایی را که معنا دارند |
 | `hstun-ctl status` / `test` / `doctor` | وضعیت؛ آزمون سرتاسری؛ بررسی سرور (فایروال، گواهی، DNS، ساعت...) |
+| `hstun-ctl test --matrix` | (روی ورودی) همهٔ ترکیب‌های carrier و اثر انگشت TLS را روی مسیر واقعی می‌سنجد (اندازه‌های echo، وقفهٔ بیکاری، soak، سرعت) و بهترین ردیف را می‌گوید |
 | `hstun-ctl logs [-f]` / `restart` | لاگ؛ راه‌اندازی مجدد |
 | `hstun-ctl edit` | تغییر تنظیمات؛ اگر تونل برنگردد خودکار لغو می‌شود |
 | `hstun-ctl update` / `rollback` | آخرین نسخه (در صورت شکست خودش برمی‌گردد) / نسخهٔ قبلی |

@@ -50,6 +50,7 @@ More: [docs/modes-and-carriers.md](docs/modes-and-carriers.md). Each carrier wor
 |---|---|
 | `hstun-ctl` | menu: shows what is installed on this host and only the actions that make sense |
 | `hstun-ctl status` / `test` / `doctor` | state; end-to-end check; checks of the host (firewall, certificate, DNS, clock...) |
+| `hstun-ctl test --matrix` | (entry) measures every carrier x TLS fingerprint on the real path: echo sizes, idle gap, soak, speeds, and names the best row |
 | `hstun-ctl logs [-f]` / `restart` | journal; restart |
 | `hstun-ctl edit` | change settings; undone automatically if the tunnel does not come back |
 | `hstun-ctl update` / `rollback` | latest release (rolls back by itself if it fails) / previous binary |
@@ -61,6 +62,8 @@ More: [docs/modes-and-carriers.md](docs/modes-and-carriers.md). Each carrier wor
 Everything has flags too, so it runs unattended (`--yes`): [docs/install.md](docs/install.md). Re-running the installer on an installed host asks
 whether to keep, change or reinstall: the certificate, secret and paths survive a change, so paired entries keep working. Services you set up by hand
 can be taken over with `hstun-ctl adopt` ([docs/operations.md](docs/operations.md)).
+
+Against traffic analysis it also pads small records, varies the keepalive timing, replaces carrier sessions on a random timer, can split the first TLS record (`tls_fragment`), and keeps its HTTP metadata out of tool-specific headers; what each does and costs is in [docs/security.md](docs/security.md).
 
 A restart is graceful: user ports close first and connections in flight get `drain_timeout` (10 s by default) to finish. A transfer that is cut (a reset on one side, or the tunnel dying) reaches the other side as a reset, not as a complete one. On the exit, `--max-mbit` and `--max-new-streams` cap what one secret key can use. See [docs/operations.md](docs/operations.md).
 

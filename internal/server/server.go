@@ -22,8 +22,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hashicorp/yamux"
-
 	"hstun/internal/auth"
 	"hstun/internal/carrier/httpmode"
 	"hstun/internal/carrier/ws"
@@ -108,6 +106,7 @@ func New(cfg *config.ServerFile, logger *slog.Logger) (*Server, error) {
 	}
 	if cfg.Server.Role == config.RoleExit {
 		s.exit = exit.New(cfg.Forward, cfg.SocksExit, idle, cfg.Server.MaxStreamsPerSession)
+		s.exit.SetProbe(!cfg.Server.DisableProbe)
 	} else {
 		s.entry = entry.New(s.hub, logger, idle, cfg.Forward, cfg.Socks, cfg.Server.ForwardMaxConnsPerIP)
 	}
@@ -204,6 +203,7 @@ func (s *Server) Serve(ctx context.Context) error {
 			IP:        s.clientIPOf,
 			Allow:     s.fail.allow,
 			Fail:      s.fail.fail,
+			Path:      s.cfg.Server.HTTPPath,
 		}, s.log)
 		mux.Handle(s.cfg.Server.HTTPPath+"/", http.StripPrefix(s.cfg.Server.HTTPPath, s.httpSrv.Handler()))
 	}
@@ -397,6 +397,9 @@ func (s *Server) runSession(c net.Conn, res *proto.ServerResult, ip string) {
 		s.log.Error("seal setup failed", "err", err)
 		return
 	}
+	sealed.SetPadding(orDefault(s.cfg.Server.Padding, seal.PadLight))
+	var padSeen atomic.Bool
+	onCaps := func(string) { sealed.SetPeerPadding(true); padSeen.Store(true) } // the peer announced that it reads padding
 	var mopts []mux.Option
 	if res.Carrier == proto.CarrierHTTP {
 		mopts = append(mopts, mux.SlowCarrier())
@@ -406,7 +409,7 @@ func (s *Server) runSession(c net.Conn, res *proto.ServerResult, ip string) {
 		s.log.Error("mux setup failed", "err", err)
 		return
 	}
-	sess := &entry.Session{Name: res.Name, KeyID: res.KeyID, Carrier: res.Carrier, IP: ip, Since: time.Now(), Mux: ms}
+	sess := &entry.Session{Name: res.Name, KeyID: res.KeyID, Carrier: res.Carrier, IP: ip, Since: time.Now(), Mux: ms, Padding: padSeen.Load}
 	if err := s.hub.Add(sess); err != nil {
 		s.log.Warn("session refused", "ip", ip, "name", res.Name, "err", err)
 		_ = ms.Close()
@@ -414,27 +417,22 @@ func (s *Server) runSession(c net.Conn, res *proto.ServerResult, ip string) {
 	}
 	s.hsOK.Add(1)
 	s.log.Info("session up", "name", res.Name, "ip", ip, "role", s.cfg.Server.Role, "sessions", s.hub.Count())
+	mux.Announce(ms)
 	if s.exit != nil {
-		go func() { _ = s.exit.ServeLimited(s.ctx, ms, s.streamGate(kl, res.Name)) }()
+		go func() { _ = s.exit.ServeLimited(s.ctx, ms, s.streamGate(kl, res.Name), onCaps) }()
 	} else {
-		go refuseStreams(ms)
+		go mux.Refuse(ms, onCaps)
 	}
 	<-ms.CloseChan()
 	s.hub.Remove(sess)
 	s.log.Info("session down", "name", res.Name, "sessions", s.hub.Count())
 }
 
-// refuseStreams closes every stream the peer opens: an entry never serves.
-func refuseStreams(ms interface {
-	AcceptStream() (*yamux.Stream, error)
-}) {
-	for {
-		st, err := ms.AcceptStream()
-		if err != nil {
-			return
-		}
-		_ = st.Close()
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
 	}
+	return v
 }
 
 // Throttled is the number of streams refused by max_new_streams_per_sec_per_key.

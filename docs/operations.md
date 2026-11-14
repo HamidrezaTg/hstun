@@ -27,6 +27,26 @@ paired entries keep working), or reinstall from scratch (new certificate and sec
 
 Several instances can live on one host (`--name NAME` on every command, or pick from the menu).
 
+## Measuring the path: `test --matrix` and `hstun probe`
+
+On the entry host (direct mode, where the entry dials the exit):
+
+```bash
+hstun-ctl test --matrix            # every carrier (ws, http, chunk) x TLS fingerprint (go, chrome, chrome_nopq, firefox)
+hstun-ctl test --matrix --quick    # shorter soak, smaller transfers
+hstun probe -config /etc/hstun/client.toml -carrier ws -fingerprint chrome -tls-fragment both   # one row, human or -json
+```
+
+Each row opens its own tunnel session (the running tunnel is not touched) and measures: how long the session takes to come up;
+an echo of 1 KB, 4 KB, 16 KB, 64 KB, 256 KB and 1 MB (paths that cut a connection after a few tens of KB show up at the step where they
+fail); an idle gap followed by one more echo; a soak of one small echo per second; and the speed of a download and an upload.
+The verdict is `ok`, `unstable` (something that should have worked failed or was lost) or `blocked` (no session). The ranking
+at the end is by **download** speed, because users download more than they upload. The command also prints what a stranger sees on the
+same port (`/` and a random path), which should look like an ordinary website.
+
+Probe streams need an exit of 0.5.0 or later (`disable_probe = true` turns them off); an older exit only gets the handshake and a
+forward-stream check. Probe streams move at most 64 MB each and only for an authenticated entry.
+
 ## Stopping and restarting
 
 `systemctl stop|restart`, `hstun-ctl restart`, `update` and `edit` send SIGTERM, which starts a **graceful stop**:

@@ -367,3 +367,31 @@ func TestTLSFingerprintConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestStealthKeysConfig(t *testing.T) {
+	cli := "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\n"
+	f, err := LoadClient(write(t, cli))
+	if err != nil || f.Client.Padding != "light" || f.Client.SessionAge != "auto" || f.Client.TLSFragment != "" {
+		t.Fatalf("defaults: %v %+v", err, f.Client)
+	}
+	for _, body := range []string{"padding=\"strong\"\n", "padding=\"off\"\n", "tls_fragment=\"both\"\n", "tls_fragment=\"tcp\"\n", "session_age=\"off\"\n", "session_age=\"45m\"\n", "disable_probe=true\n"} {
+		if _, err := LoadClient(write(t, cli+body)); err != nil {
+			t.Errorf("%q rejected: %v", body, err)
+		}
+	}
+	for _, body := range []string{"padding=\"loud\"\n", "tls_fragment=\"sideways\"\n", "session_age=\"5s\"\n", "session_age=\"often\"\n"} {
+		if _, err := LoadClient(write(t, cli+body)); err == nil {
+			t.Errorf("%q accepted", body)
+		}
+	}
+	srv := "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\n"
+	if f, err := LoadServer(write(t, srv)); err != nil || f.Server.Padding != "light" {
+		t.Fatalf("server default padding: %v", err)
+	}
+	if _, err := LoadServer(write(t, srv+"padding=\"strong\"\ndisable_probe=true\n")); err != nil {
+		t.Errorf("server padding/disable_probe: %v", err)
+	}
+	if _, err := LoadServer(write(t, srv+"padding=\"loud\"\n")); err == nil {
+		t.Error("server padding loud accepted")
+	}
+}

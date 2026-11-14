@@ -53,6 +53,12 @@ grep -q "closed the stream" "$T/test2.log" || { cat "$T/test2.log"; fail "test d
 ok "test fails and explains it when the exit's target is down"
 python3 "$T/echo.py" & pids+=($!); sleep 0.5
 
+# --- test --matrix: every row is measured with hstun probe and gets a verdict ---
+HSTUN_MATRIX_CARRIERS="ws" HSTUN_MATRIX_FPS="go chrome" "$T/bin/hstun-ctl" --name e1 test --matrix --quick >"$T/matrix.log" 2>&1 || { cat "$T/matrix.log"; fail "test --matrix"; }
+grep -Eq '^ws +go +ok ' "$T/matrix.log" && grep -Eq '^ws +chrome +ok ' "$T/matrix.log" || { cat "$T/matrix.log"; fail "matrix rows"; }
+grep -q "Best working row" "$T/matrix.log" && grep -q "A stranger on" "$T/matrix.log" || { cat "$T/matrix.log"; fail "matrix summary"; }
+ok "test --matrix measures carrier x fingerprint rows and names the best one"
+
 # --- doctor ---
 "$T/bin/hstun-ctl" doctor >"$T/doc.log" 2>&1 || { cat "$T/doc.log"; fail "doctor on the exit"; }
 grep -q "configuration" "$T/doc.log" && grep -q "certificate is valid" "$T/doc.log" || { cat "$T/doc.log"; fail "doctor output"; }

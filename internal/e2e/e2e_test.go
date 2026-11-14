@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -441,7 +442,7 @@ func TestChunkCarrierFlakyPath(t *testing.T) {
 // attempts fail, the client moves to http by itself and carries traffic.
 func TestAutoCarrierFailsOverFromWebSocketToHTTP(t *testing.T) {
 	// restore the timing only after the client goroutines have stopped (cleanups run last-in first-out)
-	t.Cleanup(client.SetAutoTiming(2, time.Hour))
+	t.Cleanup(client.SetAutoTiming(2, time.Hour, 20*time.Second))
 	e := startServer(t, []string{"http"})
 	e.startClient(t, "auto", 1, e.tunnel, e.certPath)
 	waitFor(t, 20*time.Second, func() bool { return e.srv.Sessions() >= 1 })
@@ -498,5 +499,81 @@ func TestDualStackListener(t *testing.T) {
 		}
 		cancel()
 		waitFor(t, 10*time.Second, func() bool { return e.srv.Sessions() == 0 })
+	}
+}
+
+// A carrier that connects and then stalls counts as failed: a path that cuts every
+// WebSocket after a second looks fine at dial time. With soak-based failover the
+// client leaves ws for http, which survives the cuts, and traffic flows.
+func TestAutoCarrierLeavesAWebSocketThatKeepsDying(t *testing.T) {
+	t.Cleanup(client.SetAutoTiming(2, time.Hour, 3*time.Second))
+	e := startServer(t, []string{"ws", "http"})
+	proxy, proxyCert, kill := testutil.CDNProxyKillable(t, e.tunnel)
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(1200 * time.Millisecond):
+				kill()
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop) })
+	e.startClient(t, "auto", 1, proxy, proxyCert)
+	waitFor(t, 40*time.Second, func() bool {
+		for _, s := range e.srv.SessionList() {
+			if s.Carrier == "http" {
+				return true
+			}
+		}
+		return false
+	})
+	if err := roundTrip(e.fwd, 128<<10); err != nil {
+		t.Fatalf("traffic after the failover (the path is still being cut): %v", err)
+	}
+}
+
+// The per-connection budget of the path is smaller than the configured chunk
+// sizes (here 8 KB up, 12 KB down against 12 KB and 16 KB): a chunk that is already
+// numbered cannot be cut, so the session gets stuck, ends, and the next one asks for
+// less, until requests pass.
+func TestChunkCarrierAdaptsToASmallerBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("takes about 45 s")
+	}
+	e := startServer(t, []string{"ws", "http"})
+	proxy, _ := testutil.BudgetProxy(t, e.tunnel, 8<<10, 12<<10)
+	cfg := &config.ClientFile{
+		Client: config.ClientSection{
+			Server: proxy, Carrier: "chunk", Conns: 1, ChunkDownBytes: 16 << 10,
+			SecretFile: e.secret, Name: "test", WSPath: "/hs/ws", HTTPPath: "/hs/h",
+			TLSVerify: "ca_file", CAFile: e.certPath, Ping: "2s", IdleTimeout: "30s",
+		},
+		Forward: []config.Forward{{Name: "x1", Target: e.echo}},
+	}
+	c, err := client.New(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(150 * time.Second)
+	for {
+		if e.srv.Sessions() > 0 && roundTrip(e.fwd, 24<<10) == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the chunk carrier never adapted to the 8/12 KB budget")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	for i := 0; i < 3; i++ {
+		if err := roundTrip(e.fwd, 24<<10); err != nil {
+			t.Fatalf("24 KB after adapting: %v", err)
+		}
 	}
 }

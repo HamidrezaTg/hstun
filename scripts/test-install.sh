@@ -104,10 +104,13 @@ if ./install.sh exit --yes --name lim2 --mode direct --drain-timeout soon --forw
 ./install.sh entry --yes --name au --join "$J" --carrier auto --drain-timeout 3s --forward-listen "127.0.0.1:$((base + 57))" >"$T/au.log" 2>&1 || { cat "$T/au.log"; fail "entry with --carrier auto"; }
 grep -q '^carrier     = "auto"$' "$T/etc/hstun-au/client.toml" && grep -q '^drain_timeout = "3s"$' "$T/etc/hstun-au/client.toml" || fail "carrier auto / drain are not in client.toml"
 ./install.sh uninstall --yes --purge --name lim >/dev/null 2>&1; ./install.sh uninstall --yes --purge --name au >/dev/null 2>&1; rm -rf "${T:?}/etc/hstun-lim2"
-./install.sh entry --yes --name fp --join "$J" --tls-fingerprint firefox --forward-listen "127.0.0.1:$((base + 58))" >"$T/fp.log" 2>&1 || { cat "$T/fp.log"; fail "entry with --tls-fingerprint"; }
+./install.sh entry --yes --name fp --join "$J" --tls-fingerprint firefox --tls-fragment both --padding strong --session-age 30m --conns 2 --forward-listen "127.0.0.1:$((base + 58))" >"$T/fp.log" 2>&1 || { cat "$T/fp.log"; fail "entry with --tls-fingerprint"; }
 grep -q '^tls_fingerprint = "firefox"$' "$T/etc/hstun-fp/client.toml" || fail "tls_fingerprint is not in client.toml"
+grep -q '^tls_fragment = "both"$' "$T/etc/hstun-fp/client.toml" && grep -q '^padding = "strong"$' "$T/etc/hstun-fp/client.toml" && grep -q '^session_age = "30m"$' "$T/etc/hstun-fp/client.toml" || fail "tls_fragment, padding or session_age are missing from client.toml"
+if ./install.sh entry --yes --name fp3 --join "$J" --padding loud --forward-listen "127.0.0.1:$((base + 61))" >/dev/null 2>&1; then fail "--padding accepted loud"; fi
+if ./install.sh entry --yes --name fp3 --join "$J" --tls-fragment sideways --forward-listen "127.0.0.1:$((base + 61))" >/dev/null 2>&1; then fail "--tls-fragment accepted sideways"; fi
 if ./install.sh entry --yes --name fp2 --join "$J" --tls-fingerprint netscape --forward-listen "127.0.0.1:$((base + 59))" >/dev/null 2>&1; then fail "--tls-fingerprint accepted netscape"; fi
-./install.sh uninstall --yes --purge --name fp >/dev/null 2>&1; rm -rf "${T:?}/etc/hstun-fp2"
+./install.sh uninstall --yes --purge --name fp >/dev/null 2>&1; rm -rf "${T:?}/etc/hstun-fp2" "${T:?}/etc/hstun-fp3"
 ok "--max-mbit, --max-new-streams, --drain-timeout, --carrier auto and --tls-fingerprint are written, bad values are refused"
 
 # --- the printed entry command names this exact release ---

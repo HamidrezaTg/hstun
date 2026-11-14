@@ -270,3 +270,88 @@ func TestUserResetReachesTargetThroughTheTunnel(t *testing.T) {
 		t.Fatal("the target never noticed that the user went away")
 	}
 }
+
+// Padding is negotiated by the two ends: with both new, the server sees the
+// peer's announcement, data still arrives intact, and a session of a peer that
+// does not announce stays unpadded.
+func TestPaddingIsNegotiatedAndDataIntact(t *testing.T) {
+	for _, mode := range []string{"light", "strong", "off"} {
+		d := startDirectServerMut(t, []string{"ws"}, false, 256, func(c *config.ServerFile) { c.Server.Padding = mode })
+		cfg := d.clientCfg("ws", 1, d.tunnel, d.certPath)
+		cfg.Client.Padding = mode
+		cli, err := client.New(cfg, d.log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cli.Listen(); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { cli.Run(ctx); close(done) }()
+		waitFor(t, 10*time.Second, func() bool { return cli.Sessions() >= 1 })
+		fwd := cli.ForwardAddr("x1").String()
+		waitFor(t, 10*time.Second, func() bool {
+			l := d.srv.SessionList()
+			return len(l) == 1 && l[0].Padding
+		})
+		if err := roundTrip(fwd, 3<<20); err != nil {
+			t.Fatalf("%s: %v", mode, err)
+		}
+		for i := 0; i < 20; i++ {
+			if err := roundTrip(fwd, 100+i*13); err != nil {
+				t.Fatalf("%s small %d: %v", mode, i, err)
+			}
+		}
+		cancel()
+		<-done
+		d.stop()
+	}
+}
+
+// Sessions are replaced on a timer; connections that are running stay on their old
+// session until they end, and new ones go to the new session without errors.
+func TestSessionsRotateWithoutCuttingStreams(t *testing.T) {
+	d := startDirectServer(t, []string{"ws"}, false)
+	cfg := d.clientCfg("ws", 2, d.tunnel, d.certPath)
+	cfg.Client.SessionAge = "2s" // varied by +-25 %
+	cli, err := client.New(cfg, d.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.Listen(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { cli.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, 10*time.Second, func() bool { return cli.Sessions() >= 2 })
+	fwd := cli.ForwardAddr("x1").String()
+
+	held := holdStream(t, fwd) // lives across several rotations
+	defer held.Close()
+	ids := map[uint64]bool{}
+	deadline := time.Now().Add(9 * time.Second)
+	n := 0
+	for time.Now().Before(deadline) {
+		if err := roundTrip(fwd, 4<<10); err != nil {
+			t.Fatalf("round trip %d during rotation: %v", n, err)
+		}
+		for _, s := range d.srv.SessionList() {
+			ids[s.ID] = true
+		}
+		if _, err := held.Write([]byte("ping")); err != nil {
+			t.Fatalf("held stream broke during rotation: %v", err)
+		}
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(held, buf); err != nil {
+			t.Fatalf("held stream broke during rotation: %v", err)
+		}
+		n++
+		time.Sleep(150 * time.Millisecond)
+	}
+	if len(ids) < 5 {
+		t.Fatalf("only %d distinct session ids in 9 s with a 2 s age: sessions were not replaced", len(ids))
+	}
+}

@@ -100,3 +100,72 @@ func TestPlainBackendBehindLoopbackProxy(t *testing.T) {
 		t.Fatal("TLS handshake unexpectedly succeeded against a plain backend")
 	}
 }
+
+// Someone who knows the secret http path (a CDN's log shows it) but has no session
+// still gets nothing that names the tool: every error answer is an HTML error page,
+// carries no X-Hs-* header and no cookie, and no plain-text one-word body.
+func TestTunnelPathErrorsLookLikeAWebsite(t *testing.T) {
+	e := startServerOpt(t, []string{"ws", "http"}, nil)
+	hc := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, DisableKeepAlives: true},
+	}
+	bogus := strings.Repeat("ab", 16) // a well-formed session or handshake id nobody issued
+	hdr := func(kv ...string) http.Header {
+		h := http.Header{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			h.Set(kv[i], kv[i+1])
+		}
+		return h
+	}
+	probes := []struct {
+		name, path string
+		h          http.Header
+		body       string
+	}{
+		{"unknown session, old style, up", "/hs/h/u", hdr("X-Hs-Sid", bogus, "X-Hs-Seq", "1", "X-Hs-Tag", bogus), "x"},
+		{"unknown session, old style, down", "/hs/h/d", hdr("X-Hs-Sid", bogus, "X-Hs-Ack", "0", "X-Hs-Tag", bogus), ""},
+		{"unknown session, old style, close", "/hs/h/c", hdr("X-Hs-Sid", bogus, "X-Hs-Tag", bogus), ""},
+		{"unknown handshake id", "/hs/h/a", hdr("X-Hs-Cid", bogus), strings.Repeat("p", 32)},
+		{"hello of the wrong size", "/hs/h/o", nil, strings.Repeat("h", 10)},
+		{"hello with a cookie marker", "/hs/h/o", hdr("Cookie", "s1234abcd="+bogus), strings.Repeat("h", 70)},
+		{"oversize body", "/hs/h/u", hdr("X-Hs-Sid", bogus, "X-Hs-Seq", "1"), strings.Repeat("z", 80<<10)},
+		{"cookie style, unknown names", "/hs/h/u", hdr("Cookie", "abc="+bogus+"; def="+bogus), "x"},
+	}
+	for _, p := range probes {
+		req, _ := http.NewRequest("POST", "https://"+e.tunnel+p.path, strings.NewReader(p.body))
+		for k, v := range p.h {
+			req.Header[k] = v
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			if strings.Contains(p.name, "oversize") {
+				continue // the server may hang up on a huge body, as nginx can too
+			}
+			t.Errorf("%s: %v", p.name, err)
+			continue
+		}
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		if resp.StatusCode < 400 {
+			t.Errorf("%s: status %d for a request without a session", p.name, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			t.Errorf("%s: Content-Type %q, want an HTML error page (plain text would be a signature)", p.name, ct)
+		}
+		for k := range resp.Header {
+			if strings.HasPrefix(strings.ToLower(k), "x-hs-") || strings.EqualFold(k, "Set-Cookie") || strings.EqualFold(k, "Server") {
+				t.Errorf("%s: response header %s", p.name, k)
+			}
+		}
+		low := strings.ToLower(string(b))
+		for _, w := range []string{"hstun", "go-http", "websocket", "tag", "gone", "expired", "slow down"} {
+			if strings.TrimSpace(low) == w { // a bare plain-text word; an HTML page that says "Gone" is fine
+				t.Errorf("%s: body %q gives away the tool", p.name, b)
+			}
+		}
+		if !strings.Contains(low, "<html") {
+			t.Errorf("%s: body is not a web page: %q", p.name, b)
+		}
+	}
+}

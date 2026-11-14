@@ -47,18 +47,18 @@ Each item has an id used by the benchmark. "Effort" is a rough estimate for one 
 
 ### P1: cheap, high value (about a day each)
 
-| id | item | from | effort | expected effect | cost |
-|---|---|---|---|---|---|
-| T2 | split the first TLS record (ClientHello) into two or more TCP segments, optional small delay (`tls_fragment`) | Xray `fragment` | 0.5 d | beats SNI filters that do not reassemble | a few ms on connect |
-| T3 | jittered keepalive interval and random-size pings (mux) | C-Tunnel, BackPack lessons | 0.5 d | removes the fixed-period heartbeat | none |
-| T4 | carrier metadata out of `X-Hs-Sid/Seq/Ack/Tag/Mx` into the sealed body or an opaque cookie | NipoVPN | 1 d | a CDN or middlebox no longer sees a tool signature | none |
-| T5 | browser-like header set on the HTTP carriers (Accept, Accept-Language, Sec-Fetch-*, ordered like the profile) | Xray `browser.go` | 0.5 d | only visible after TLS termination (CDN path) | none |
-| T6 | padding: bucket the size of the first N records and of pings (`padding = "off" or "light" or "strong"`) | Xray XHTTP, GhostTunnel, BackPack Stealth | 1-2 d | flattens size patterns | 5-30 % bytes |
-| T7 | connection lifetime randomisation (rotate carrier connections after a random 10-40 min, jittered reconnects) and small pool pinned per stream | Xray xmux, GhostWire | 1 d | removes constant-lifetime flows | a reconnect |
-| T8 | probe-resistance audit: a stranger gets bytes and timing identical to the decoy on every path (wrong path, wrong method, bad hello, half-open) | GhostWire review, Xray fallback | 1 d | closes active-probing tells | none |
-| T9 | `hstun-ctl test --matrix`: carrier x fingerprint x port x direction with size escalation, idle gap, 60 s soak, prober check, per-direction speed, JSON output | BackPack, C-Tunnel | 2 d | the measuring tool for everything else | none |
-| T10 | `carrier = "auto"` decides by soak, not only by dial success; settle period after a switch | BackPack | 1 d | a carrier that connects and then stalls counts as failed | probe traffic |
-| T11 | adaptive chunk budget: shrink on loss, probe up slowly | NipoVPN review | 1 d | survives changing per-connection cuts | none |
+| id | item | from | effort | expected effect | cost | status |
+|---|---|---|---|---|---|---|
+| T2 | split the first TLS record (ClientHello) into several TCP segments or TLS records (`tls_fragment`: off, tcp, record, both) | Xray `fragment` | 0.5 d | beats SNI filters that do not reassemble | a few ms on connect | **built, off by default; measure (B2)** |
+| T3 | jittered keepalive interval (+-40 %) and random-size filler with each ping | C-Tunnel, BackPack lessons | 0.5 d | removes the fixed-period heartbeat | none | **built, on; measure (B4)** |
+| T4 | carrier metadata out of `X-Hs-Sid/Seq/Ack/Tag/Mx` into cookies named from the secret path (old and new ends interoperate) | NipoVPN | 1 d | a CDN or middlebox no longer sees a tool signature | none | **built, on** |
+| T5 | browser-like header set on the HTTP carriers (Accept, Accept-Language, Origin, Sec-Fetch-*, Sec-CH-UA per profile; no ordering: Go sorts headers) | Xray `browser.go` | 0.5 d | only visible after TLS termination (CDN path) | none | **built, on** |
+| T6 | padding: random filler on small records, the first 16 records shaped to 900-1400 B in `strong` (`padding`), negotiated with the peer | Xray XHTTP, GhostTunnel, BackPack Stealth | 1-2 d | flattens size patterns | light: a few KB per minute; strong: more | **built, `light` on; measure (B3)** |
+| T7 | connection lifetime randomisation (`session_age`: replace sessions after a random 10-40 min, old one drains) | Xray xmux, GhostWire | 1 d | removes constant-lifetime flows | a reconnect | **built, on for conns >= 2; measure (B4)** |
+| T8 | probe-resistance audit: a stranger gets bytes and timing identical to the decoy on every path (wrong path, wrong method, bad hello, half-open) | GhostWire review, Xray fallback | 1 d | closes active-probing tells | none | **done for bodies and headers (the http carrier errors were plain text and are now HTML pages, tested); timing of rejected handshakes not compared yet** |
+| T9 | `hstun-ctl test --matrix` and `hstun probe`: carrier x fingerprint (and fragment) with size escalation, idle gap, soak, per-direction speed, stranger check, JSON | BackPack, C-Tunnel | 2 d | the measuring tool for everything else | none | **built (direct mode; the port and direction axes are not in it)** |
+| T10 | `carrier = "auto"` decides by soak (a session must stay up 20 s), not only by dial success | BackPack | 1 d | a carrier that connects and then stalls counts as failed | probe traffic | **built; tested with a path that cuts websockets** |
+| T11 | adaptive chunk budget: a stuck session shrinks the next one by a third, a session that ran 3 minutes grows it by a tenth | NipoVPN review | 1 d | survives changing per-connection cuts | none | **built, between sessions (an already numbered chunk cannot be cut smaller, so shrinking inside a session would never unstick it)** |
 
 ### P2: medium (several days each)
 
