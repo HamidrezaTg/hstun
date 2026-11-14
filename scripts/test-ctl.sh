@@ -115,6 +115,10 @@ for _ in $(seq 1 20); do [ "$(sessions)" -eq 0 ] && break; sleep 0.5; done
 [ "$(sessions)" -eq 0 ] || fail "the entry still reports sessions with the exit stopped"
 if "$T/bin/hstun-ctl" --name e1 test >"$T/nos.log" 2>&1; then cat "$T/nos.log"; fail "test passed with no tunnel session"; fi
 grep -q "no tunnel session" "$T/nos.log" || { cat "$T/nos.log"; fail "test did not say there is no session"; }
+# the menu must still come up when an instance has no session (it once exited silently right after "Installed on this host:")
+printf '0\n' >"$T/menu0.ans"
+HSTUN_NO_UPDATE_CHECK=1 HSTUN_TTY="$T/menu0.ans" "$T/bin/hstun-ctl" >"$T/menu0.log" 2>&1 || { cat "$T/menu0.log"; fail "menu with a session-less instance"; }
+grep -q "Status" "$T/menu0.log" && grep -q "Install another instance" "$T/menu0.log" || { cat "$T/menu0.log"; fail "the menu stopped after the instance list when an instance had no session"; }
 restart_server
 restart_client || fail "the entry did not reconnect to the restarted exit"
 ok "with the exit stopped the entry shows no session and test fails"

@@ -14,6 +14,8 @@
 # Run it with no arguments for a menu. Every question has a flag or an HSTUN_* environment variable,
 # so it runs unattended with --yes. See README.md ("Install").
 set -Eeuo pipefail
+# run from a directory that was just deleted (uninstall --purge from inside /etc/hstun): move out of it, quietly
+pwd >/dev/null 2>&1 || cd / 2>/dev/null || true
 
 INSTALLER_VERSION="0.5.0"
 REPO="${HSTUN_REPO:-HamidrezaTg/hstun}"
@@ -1638,7 +1640,8 @@ instance_line() { # config directory: one status line
     [ -n "$unit" ] && st=$(systemctl is-active "$unit" 2>/dev/null || true)
     if [ -n "$ADMIN_PORT" ]; then
       a=$(curl -s -m 1 "http://127.0.0.1:$ADMIN_PORT/stats" 2>/dev/null || true)
-      [ -n "$a" ] && sess=$(printf '%s' "$a" | grep -o '"id":' | wc -l)
+      # grep finds nothing when there is no session, and with pipefail that would end the whole menu
+      [ -n "$a" ] && sess=$(printf '%s' "$a" | grep -o '"id":' | wc -l || true)
     fi
     local what=${MODE:-${CARRIER:-}}
     printf '  %-10s %-6s %-12s %-9s %s\n' "${NAME:-default}" "$ROLE" "$what" "${st:-?}" "${sess:+$sess session(s)}"
