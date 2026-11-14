@@ -118,10 +118,12 @@ ok "status and show-join work on adopted instances"
 if ./install.sh exit --yes --forward-target 127.0.0.1:1 >"$T/guard.log" 2>&1; then fail "install over adopted succeeded"; fi
 has "$T/guard.log" "was adopted"
 mkdir -p "$T/etc/hstun-zz"; echo "[server]" >"$T/etc/hstun-zz/server.toml"
+printf '[Service]\nExecStart=%s/bin/hstun server -config %s/etc/hstun-zz/server.toml\n' "$T" "$T" >"$T/systemd/hstun-zz-server.service"
 if ./install.sh exit --yes --name zz --forward-target 127.0.0.1:1 >"$T/guard2.log" 2>&1; then fail "install over unmanaged succeeded"; fi
 has "$T/guard2.log" "not installed by hstun-ctl"
 cmp -s "$T/etc/hstun/server.toml" "$T/server.before" || fail "guard did not protect the config"
-rm -rf "$T/etc/hstun-zz"
+[ -f "$T/etc/hstun-zz/server.toml" ] || fail "the unmanaged setup was removed"
+rm -rf "$T/etc/hstun-zz" "$T/systemd/hstun-zz-server.service"
 ok "install refuses adopted and unmanaged setups"
 
 # 5. update: preflight protects, then both binaries are replaced with .prev kept

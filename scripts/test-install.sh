@@ -134,4 +134,68 @@ for n in e1 ""; do ./install.sh uninstall --yes --purge ${n:+--name "$n"} >/dev/
 [ -z "$(ls -A "$T/etc" 2>/dev/null)" ] && [ ! -e "$T/bin/hstun" ] && [ -z "$(ls -A "$T/systemd")" ] || fail "files left after --purge"
 [ -x "$T/bin/hstun-ctl" ] || fail "hstun-ctl was removed with the last instance"
 ok "uninstall --purge leaves nothing but hstun-ctl (kept so you can install again)"
+
+# --- a failed first install leaves nothing behind; leftovers of older runs can be cleaned (the paris dead end) ---
+export HSTUN_BACKUP_DIR="$T/backup"; mkdir -p "$HSTUN_BACKUP_DIR"
+rbnoyes=(--mode direct --forward-target "127.0.0.1:$((base + 1))" --backend-port "$((base + 5))")
+rbflags=(--yes "${rbnoyes[@]}")
+for at in check units firewall; do
+  if HSTUN_TEST_FAIL_AT=$at ./install.sh exit "${rbflags[@]}" --name rb --port "$((base + 70))" >"$T/rb-$at.log" 2>&1; then fail "a forced failure at $at did not fail the install"; fi
+  grep -q "forced failure at $at" "$T/rb-$at.log" && grep -q "nothing of this install was left behind" "$T/rb-$at.log" || { cat "$T/rb-$at.log"; fail "failure at $at: no rollback message"; }
+  [ ! -e "$T/etc/hstun-rb" ] && [ -z "$(ls -A "$T/systemd")" ] || { ls -R "$T/etc" "$T/systemd"; fail "files left after a failed install at $at"; }
+done
+ok "an exit install that fails at check, units or firewall leaves no files behind"
+./install.sh exit "${rbflags[@]}" --name rb --port "$((base + 70))" >"$T/rb-ok.log" 2>&1 || { cat "$T/rb-ok.log"; fail "install after the failed attempts"; }
+J2=$("$T/bin/hstun-ctl" --name rb show-join 2>/dev/null)
+for at in check units; do
+  if HSTUN_TEST_FAIL_AT=$at ./install.sh entry --yes --name rbe --join "$J2" --forward-listen "127.0.0.1:$((base + 71))" >"$T/rbe-$at.log" 2>&1; then fail "entry failure at $at did not fail"; fi
+  [ ! -e "$T/etc/hstun-rbe" ] && [ ! -e "$T/systemd/hstun-rbe-client.service" ] || fail "files left after a failed entry install at $at"
+done
+ok "an entry install that fails leaves no files behind either"
+mkdir -p "$T/etc/hstun-keep"; echo mine >"$T/etc/hstun-keep/mycert.pem"
+if HSTUN_TEST_FAIL_AT=check ./install.sh exit "${rbflags[@]}" --name keep --port "$((base + 72))" >/dev/null 2>&1; then fail "failure at check passed"; fi
+[ -f "$T/etc/hstun-keep/mycert.pem" ] && [ ! -e "$T/etc/hstun-keep/server.toml" ] || fail "rollback removed a file that was there before, or kept one it wrote"
+rm -rf "${T:?}/etc/hstun-keep"
+if HSTUN_TEST_FAIL_AT=units-int ./install.sh exit "${rbflags[@]}" --name rbi --port "$((base + 75))" >"$T/rbi.log" 2>&1; then fail "Ctrl+C at units did not stop the install"; fi
+[ ! -e "$T/etc/hstun-rbi" ] && ! compgen -G "$T/systemd/hstun-rbi-*" >/dev/null || { cat "$T/rbi.log"; ls -R "$T/etc" "$T/systemd"; fail "files left after Ctrl+C during the install"; }
+ok "Ctrl+C during a first install also leaves nothing behind"
+ok "the rollback removes only what the install wrote"
+./install.sh uninstall --yes --purge --name rb >/dev/null 2>&1
+
+# leftovers: config files without install.conf and without a service
+mkorphan() { mkdir -p "$T/etc/hstun-orph"; printf 'role = "exit"\n' >"$T/etc/hstun-orph/server.toml"; printf 'secretvalue\n' >"$T/etc/hstun-orph/secret"; }
+mkorphan
+if setsid -w ./install.sh exit "${rbnoyes[@]}" --name orph --port "$((base + 73))" </dev/null >"$T/orph1.log" 2>&1; then fail "install over leftovers passed without a terminal and without --yes"; fi
+grep -q "hstun-ctl clean --name orph" "$T/orph1.log" || { cat "$T/orph1.log"; fail "the error does not name the clean command"; }
+[ -f "$T/etc/hstun-orph/server.toml" ] || fail "leftovers were removed without asking"
+printf 'n\n' >"$T/ansn"
+if HSTUN_TTY="$T/ansn" ./install.sh exit "${rbnoyes[@]}" --name orph --port "$((base + 73))" >/dev/null 2>&1; then fail "declining the clean-up still installed"; fi
+[ -f "$T/etc/hstun-orph/server.toml" ] || fail "declined clean-up removed the leftovers"
+ok "leftovers block the install with the exact command; declining changes nothing"
+if ./install.sh uninstall --yes --name orph >"$T/orph2.log" 2>&1; then fail "uninstall of leftovers passed"; fi
+grep -q "hstun-ctl clean --name orph" "$T/orph2.log" && ! grep -q "install it first" "$T/orph2.log" || { cat "$T/orph2.log"; fail "uninstall does not point at clean"; }
+printf '0\n' >"$T/ans0"
+HSTUN_NO_UPDATE_CHECK=1 HSTUN_TTY="$T/ans0" "$T/bin/hstun-ctl" >"$T/orph-menu.log" 2>&1 || { cat "$T/orph-menu.log"; fail "menu with leftovers"; }
+grep -q "Remove leftovers" "$T/orph-menu.log" && ! grep -q "Adopt hand-installed" "$T/orph-menu.log" || { cat "$T/orph-menu.log"; fail "menu does not offer the clean-up"; }
+ok "uninstall and the menu point at the clean-up"
+printf 'y\n' >"$T/ansy"
+HSTUN_TTY="$T/ansy" "$T/bin/hstun-ctl" clean >"$T/orph3.log" 2>&1 || { cat "$T/orph3.log"; fail "clean"; }
+[ ! -e "$T/etc/hstun-orph" ] || fail "clean left the directory"
+bk=$(ls "$HSTUN_BACKUP_DIR"/hstun-leftover-hstun-orph-*.tar.gz 2>/dev/null | head -1); [ -n "$bk" ] || fail "clean wrote no backup"
+tar -tzf "$bk" | grep -q 'hstun-orph/secret' || fail "the backup lacks the secret"
+[ "$(stat -c %a "$bk")" = 600 ] || fail "the backup is not private"
+ok "clean backs the leftovers up (private archive) and removes them"
+mkorphan
+./install.sh exit "${rbflags[@]}" --name orph --port "$((base + 73))" >"$T/orph4.log" 2>&1 || { cat "$T/orph4.log"; fail "install over leftovers with --yes"; }
+grep -q "private backup" "$T/orph4.log" && [ -f "$T/etc/hstun-orph/install.conf" ] || { cat "$T/orph4.log"; fail "--yes did not clean and install"; }
+./install.sh uninstall --yes --purge --name orph >/dev/null 2>&1
+ok "install --yes removes leftovers (with a backup) and installs"
+# a directory that a service still runs from keeps the adopt path
+mkdir -p "$T/etc/hstun-ref"; printf 'role = "exit"\n' >"$T/etc/hstun-ref/server.toml"
+printf '[Service]\nExecStart=%s/bin/hstun server -config %s/etc/hstun-ref/server.toml\n' "$T" "$T" >"$T/systemd/hstun-ref-server.service"
+if ./install.sh exit "${rbflags[@]}" --name ref --port "$((base + 74))" >"$T/ref.log" 2>&1; then fail "install over a directory with a service passed"; fi
+grep -q "hstun-ctl adopt" "$T/ref.log" || { cat "$T/ref.log"; fail "a directory with a service lost the adopt hint"; }
+[ -f "$T/etc/hstun-ref/server.toml" ] || fail "a directory with a service was removed"
+rm -rf "${T:?}/etc/hstun-ref" "$T/systemd/hstun-ref-server.service"
+ok "a directory that a service uses still points at adopt and is never removed"
 echo "install.sh staging test passed"

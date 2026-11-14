@@ -16,7 +16,7 @@ recognise and block, and the [stealth plan](docs/stealth-plan.md) lists what is 
 - **Exit**: the host outside the restricted network. It receives the tunnel and passes the traffic to your proxy.
 - **Entry**: the host inside. Your users (or your proxy clients) connect to it.
 
-Version 0.5.0. Pre-release, not independently audited. Details: [docs/security.md](docs/security.md).
+Version 0.5.1. Pre-release, not independently audited. Details: [docs/security.md](docs/security.md).
 
 ## Quick start
 
@@ -57,7 +57,7 @@ More: [docs/modes-and-carriers.md](docs/modes-and-carriers.md). Each carrier wor
 | `hstun-ctl show-join` | the pair code again (`--no-secret` for the version without the secret) |
 | `hstun-ctl backup` / `restore FILE [--test]` | one private archive of every instance / check and restore it |
 | `hstun-ctl rotate-secret` / `pin VERSION` | new secret without downtime / keep every host on one release |
-| `hstun-ctl uninstall [--purge]` | remove an instance |
+| `hstun-ctl uninstall [--purge]` / `clean` | remove an instance / remove leftovers of an install that stopped half-way |
 
 Everything has flags too, so it runs unattended (`--yes`): [docs/install.md](docs/install.md). Re-running the installer on an installed host asks
 whether to keep, change or reinstall: the certificate, secret and paths survive a change, so paired entries keep working. Services you set up by hand

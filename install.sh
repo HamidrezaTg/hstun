@@ -14,10 +14,11 @@
 # Run it with no arguments for a menu. Every question has a flag or an HSTUN_* environment variable,
 # so it runs unattended with --yes. See README.md ("Install").
 set -Eeuo pipefail
+ORIG_PWD="${PWD:-}" # where the user's shell is, to warn when we delete that directory
 # run from a directory that was just deleted (uninstall --purge from inside /etc/hstun): move out of it, quietly
 pwd >/dev/null 2>&1 || cd / 2>/dev/null || true
 
-INSTALLER_VERSION="0.5.0"
+INSTALLER_VERSION="0.5.1"
 REPO="${HSTUN_REPO:-HamidrezaTg/hstun}"
 WANT_VERSION="${HSTUN_VERSION:-}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
@@ -37,7 +38,12 @@ info() { printf '%s\n' "${G}[hstun]${N} $*"; }
 warn() { printf '%s\n' "${Y}[hstun] warning:${N} $*" >&2; }
 die() { printf '%s\n' "${R}[hstun] error:${N} $*" >&2; exit 1; }
 # shellcheck disable=SC2154  # rc is set inside the trap string
-trap 'rc=$?; [ -n "${STAGE:-}" ] && rm -rf "$STAGE"; exit $rc' EXIT
+# a failed first install removes what it wrote (rollback_fresh); the menu runs actions in a subshell and sets this trap again there
+EXIT_TRAP='rc=$?; [ "$rc" = 0 ] || rollback_fresh; [ -n "${STAGE:-}" ] && rm -rf "$STAGE"; exit $rc'
+# shellcheck disable=SC2064  # EXIT_TRAP is a single-quoted body; it is meant to be expanded when the trap fires
+trap "$EXIT_TRAP" EXIT
+trap 'exit 130' INT # Ctrl+C, hang-up or kill end the script normally, so the EXIT trap (rollback, temp files) always runs
+trap 'exit 143' TERM HUP
 
 # ---------- input ----------
 YES=0
@@ -240,6 +246,7 @@ load_conf() { # saved values only fill what is still empty (flags win)
 }
 save_conf() {
   local k
+  FRESH=0 # from here on the instance is managed: a later failure is resumed with hstun-ctl, not rolled back
   { for k in "${CONF_KEYS[@]}"; do printf '%s=%q\n' "$k" "${!k-}"; done; } >"$ETC/install.conf"
   chmod 0600 "$ETC/install.conf"
 }
@@ -254,9 +261,99 @@ guard_existing() { # ROLE-WANTED
   if [ -n "$ROLE" ] && [ "$ROLE" != "${1:-$ROLE}" ]; then die "instance ${NAME:-default} is an $ROLE; use --name to install an ${1} next to it"; fi
   if [ -n "$ADOPTED" ]; then die "instance ${NAME:-default} was adopted from a hand-made setup; install would rewrite its files. Use update, restart or uninstall, or pick another --name."; fi
   if [ ! -f "$ETC/install.conf" ] && { [ -f "$ETC/server.toml" ] || [ -f "$ETC/client.toml" ]; }; then
-    die "found an hstun setup in $ETC that was not installed by hstun-ctl. Run: install.sh adopt   (or choose another --name)"
+    if is_orphan "$ETC"; then offer_clean "$ETC"
+    else die "found an hstun setup in $ETC with a service that was not installed by hstun-ctl. To manage it run: hstun-ctl adopt   (or choose another --name)"; fi
   fi
 }
+# ---------- failed installs and leftovers ----------
+# Test hook: HSTUN_TEST_FAIL_AT=check|units|firewall makes the install fail at that step, check-int|units-int sends it Ctrl+C there (staging tests only).
+fail_at() {
+  if [ "${HSTUN_TEST_FAIL_AT:-}" = "$1" ]; then die "test hook: forced failure at $1"; fi
+  if [ "${HSTUN_TEST_FAIL_AT:-}" = "$1-int" ]; then kill -INT $$; sleep 1; fi # Ctrl+C at that step
+  return 0
+}
+# A first install that stops half-way must not leave config files without install.conf (hstun-ctl would neither manage
+# nor remove them, and the next install would refuse). FRESH is set when this run creates the instance and cleared
+# by the first save_conf; the EXIT trap then calls rollback_fresh.
+FRESH=0 FRESH_ETC_EXISTED=0 FRESH_SNAPSHOT="" DECOY_CREATED=0
+begin_fresh() {
+  [ -f "$ETC/install.conf" ] && return 0
+  FRESH=1
+  if [ -d "$ETC" ]; then FRESH_ETC_EXISTED=1; FRESH_SNAPSHOT=$(ls -A "$ETC" 2>/dev/null || true); else FRESH_ETC_EXISTED=0; FRESH_SNAPSHOT=""; fi
+}
+remove_instance_files() { # units, firewall rules and the certificate hook of the current instance (NAME/UNIT set)
+  local u
+  for u in $(units_of_instance); do
+    sysd disable --now "$u" >/dev/null 2>&1 || true
+    rm -f "${SYSTEMD_DIR:?}/${u:?}"
+  done
+  sysd daemon-reload
+  fw_remove
+  rm -f "/etc/letsencrypt/renewal-hooks/deploy/${UNIT:?}.sh"
+}
+rollback_fresh() {
+  [ "$FRESH" = 1 ] || return 0
+  FRESH=0; set +e
+  warn "the install did not finish; removing what it wrote so that the next run starts clean"
+  remove_instance_files
+  local f
+  if [ -n "${ETC:-}" ] && [ -d "$ETC" ]; then
+    # only what this run added: files that were there before (for example a certificate you pointed --cert at) stay
+    for f in "$ETC"/* "$ETC"/.[!.]*; do
+      [ -e "$f" ] || continue
+      case $'\n'"$FRESH_SNAPSHOT"$'\n' in *$'\n'"${f##*/}"$'\n'*) continue ;; esac
+      rm -rf "${f:?}"
+    done
+    [ "$FRESH_ETC_EXISTED" = 1 ] || rmdir "$ETC" 2>/dev/null
+  fi
+  [ "$DECOY_CREATED" = 1 ] && [ -z "$DECOY_DIR" ] && [ -n "${DECOY_TARGET:-}" ] && rm -rf "${DECOY_TARGET:?}"
+  info "nothing of this install was left behind. Fix the problem shown above and run the install again."
+}
+unit_references() { # DIR: true when an hstun unit file runs a config inside DIR
+  local line
+  while IFS= read -r line; do
+    case "${line##*|}" in "$1"/*) return 0 ;; esac
+  done < <(adopt_candidates)
+  return 1
+}
+is_orphan() { # DIR: config files, no install.conf, and no service that uses them (what a stopped install leaves)
+  [ -f "$1/install.conf" ] && return 1
+  [ -f "$1/server.toml" ] || [ -f "$1/client.toml" ] || return 1
+  unit_references "$1" && return 1
+  return 0
+}
+orphan_dirs() {
+  local d
+  for d in "$ETC_BASE"/hstun "$ETC_BASE"/hstun-*; do [ -d "$d" ] && is_orphan "$d" && echo "$d"; done
+  return 0
+}
+clean_dir() { # DIR: private backup, then remove
+  local d=$1 out
+  out="${HSTUN_BACKUP_DIR:-/root}/hstun-leftover-${d##*/}-$(date +%Y%m%d-%H%M%S).tar.gz"
+  ( umask 077; tar -czf "$out" -C "${d%/*}" "${d##*/}" 2>/dev/null ) || die "could not write the backup $out; nothing was removed"
+  rm -rf "${d:?}"
+  info "removed $d (private backup with its secret and certificate: $out)"
+  case "$ORIG_PWD/" in "$d"/*) warn "your shell was inside $d, which no longer exists. Run: cd /" ;; esac
+}
+offer_clean() { # DIR: leftovers of an unfinished install block a new install; remove them, or say how
+  local d=$1
+  info "found leftovers of an unfinished install in $d: config files that no service uses and hstun-ctl does not manage"
+  if [ "$YES" != 1 ] && [ -z "$TTY" ]; then die "remove them with: hstun-ctl clean${NAME:+ --name $NAME}   (a private backup is written first), or choose another --name"; fi
+  confirm "Back them up and remove them, then continue?" n || die "left in place. Remove them with: hstun-ctl clean${NAME:+ --name $NAME}, or choose another --name"
+  clean_dir "$d"
+}
+cmd_clean() {
+  need_root
+  local d list=()
+  if [ -n "$NAME" ]; then set_paths; if is_orphan "$ETC"; then list=("$ETC"); fi
+  else while IFS= read -r d; do [ -n "$d" ] && list+=("$d"); done < <(orphan_dirs); fi
+  if [ "${#list[@]}" = 0 ]; then info "no leftovers of unfinished installs found"; return 0; fi
+  for d in "${list[@]}"; do
+    info "leftovers in $d: $(ls -A "$d" | tr '\n' ' ')"
+    if confirm "Back up and remove $d?" y; then clean_dir "$d"; else info "left $d in place"; fi
+  done
+}
+
 # An instance of this name exists: say what it is and let the user keep, change or reinstall it.
 # Returns 1 when the user chose to keep it unchanged.
 existing_prompt() {
@@ -293,7 +390,13 @@ reinstall_wipe() {
   rm -f "${ETC:?}/cert.pem" "${ETC:?}/key.pem" "${ETC:?}/secret" "${ETC:?}/install.conf" "${ETC:?}/server.toml" "${ETC:?}/client.toml"
   info "starting from scratch: new certificate, secret and paths"
 }
-need_installed() { [ -f "$ETC/install.conf" ] || die "no hstun instance${NAME:+ named $NAME} found in $ETC (install it first)"; load_conf; }
+need_installed() {
+  if [ ! -f "$ETC/install.conf" ]; then
+    if is_orphan "$ETC"; then die "$ETC holds leftovers of an unfinished install, not a working instance. Remove them with: hstun-ctl clean${NAME:+ --name $NAME}   (a private backup is written first)"; fi
+    die "no hstun instance${NAME:+ named $NAME} found in $ETC (install it first)"
+  fi
+  load_conf
+}
 
 # ---------- certificates ----------
 spki_of() { openssl x509 -in "$1" -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -hex | sed 's/^.*= //'; }
@@ -317,6 +420,7 @@ cert_acme() {
 # ---------- firewall ----------
 ufw_active() { have ufw && ufw status 2>/dev/null | grep -q '^Status: active'; }
 fw_allow() { # port [from]
+  fail_at firewall
   [ "$TEST" = 1 ] && return 0
   [ -n "$NO_FW" ] && return 0
   if ! ufw_active; then warn "ufw is not active: open $1/tcp in your firewall yourself"; return 0; fi
@@ -684,12 +788,13 @@ $socks
 EOF
 }
 check_conf() { # file mode
+  fail_at check
   "$BIN_DIR/hstun" check -config "$1" -mode "$2" >/dev/null || die "generated config is invalid: $1"
 }
 install_decoy() {
   if [ -n "$DECOY_DIR" ]; then DECOY_TARGET="$DECOY_DIR"; return 0; fi
   [ -d "$DECOY_TARGET" ] && return 0
-  install -d -m 0755 "$DECOY_TARGET"
+  install -d -m 0755 "$DECOY_TARGET"; DECOY_CREATED=1
   cp "$SHARE_DIR/decoy-example/"* "$DECOY_TARGET/"
   # a decoy identical on every host is itself a fingerprint: give each host its own title
   local titles=("Workshop notes" "Garden log" "Bench notes" "Study notes" "Trail journal" "Kitchen notes") t
@@ -750,7 +855,7 @@ start_unit() { # unit
 
 install_exit() {
   need_root
-  set_paths; existing_prompt || return 0; load_conf; guard_existing exit
+  set_paths; existing_prompt || return 0; load_conf; guard_existing exit; begin_fresh
   ROLE="exit"
   if [ -z "$MODE" ]; then
     if [ "$YES" != 1 ] && [ -n "$TTY" ]; then
@@ -814,7 +919,7 @@ install_exit() {
   render_server_toml
   own "root:$SVC_USER" "$ETC/server.toml"; chmod 0640 "$ETC/server.toml"
   check_conf "$ETC/server.toml" server
-  render_units
+  render_units; fail_at units
   if [ "$MODE" = nginx ]; then
     render_nginx_conf; own "root:root" "$ETC/nginx.conf"; chmod 0644 "$ETC/nginx.conf"
     render_nginx_units
@@ -907,7 +1012,7 @@ parse_join() {
 }
 install_entry() {
   need_root
-  set_paths; existing_prompt || return 0; load_conf; guard_existing entry
+  set_paths; existing_prompt || return 0; load_conf; guard_existing entry; begin_fresh
   ROLE=entry
   [ -n "$JOIN" ] && parse_join
   ask SERVER "Exit address (host:port)" ""
@@ -969,7 +1074,7 @@ install_entry() {
   render_client_toml
   own "root:$SVC_USER" "$ETC/client.toml"; chmod 0640 "$ETC/client.toml"
   check_conf "$ETC/client.toml" client
-  render_units
+  render_units; fail_at units
   case "$FORWARD_LISTEN" in 0.0.0.0:* | \[::\]:* | :*) fw_allow "$lp" ;; esac
   save_conf
   start_unit "$UNIT-client.service"
@@ -1127,19 +1232,13 @@ cmd_show_secret() {
 cmd_uninstall() {
   need_root; set_paths; need_installed
   confirm "Remove hstun instance ${NAME:-default} ($ROLE)?" n || { info "nothing removed"; return 0; }
-  local u
-  for u in $(units_of_instance); do
-    sysd disable --now "$u" >/dev/null 2>&1 || true
-    rm -f "${SYSTEMD_DIR:?}/${u:?}"
-  done
-  sysd daemon-reload
-  fw_remove
-  rm -f "/etc/letsencrypt/renewal-hooks/deploy/${UNIT:?}.sh"
+  remove_instance_files
   [ -n "$ADOPTED" ] && info "firewall rules and certificates of an adopted instance were not created by hstun-ctl and are left in place"
   if [ "$PURGE" = 1 ]; then
     [ -n "$ADOPT_BIN" ] && [ "$ADOPT_BIN" != "$BIN_DIR/hstun" ] && rm -f "$ADOPT_BIN" "$ADOPT_BIN.prev"
     rm -rf "${ETC:?}"; [ -d "$DECOY_TARGET" ] && [ -z "$DECOY_DIR" ] && rm -rf "${DECOY_TARGET:?}"
     info "removed $ETC (configuration, secret and certificate)"
+    case "$ORIG_PWD/" in "$ETC"/*) warn "your shell was inside $ETC, which no longer exists. Run: cd /" ;; esac
     local left=0 d
     for d in "$ETC_BASE"/hstun "$ETC_BASE"/hstun-*; do [ -f "$d/install.conf" ] && left=$((left + 1)); done
     if [ "$left" = 0 ]; then
@@ -1729,6 +1828,10 @@ act_install_more() {
   [ -f "$ETC/install.conf" ] && die "an instance named $nm already exists"
   case "$role" in 1) install_exit ;; 2) install_entry ;; *) die "choose 1 or 2" ;; esac
 }
+run_action() { # one menu action in a subshell: a failure returns to the menu, a failed first install is still rolled back
+  # shellcheck disable=SC2064  # EXIT_TRAP is a single-quoted body, expanded when the trap fires
+  ( set -e; trap "$EXIT_TRAP" EXIT; trap 'exit 130' INT; trap 'exit 143' TERM HUP; "$@" )
+}
 menu() {
   [ -n "$TTY" ] || die "no terminal; run: install.sh help"
   trap ':' INT # Ctrl+C stops a live log and returns here instead of leaving the script
@@ -1765,6 +1868,10 @@ menu() {
       labels+=("Install an exit"); actions+=(act_install_exit); hints+=("the outside host: receives the traffic and passes it to your proxy")
       labels+=("Install an entry"); actions+=(act_install_entry); hints+=("the restricted host: your users connect here")
     fi
+    if [ -n "$(orphan_dirs)" ]; then
+      echo "${Y}Leftovers of an unfinished install: $(orphan_dirs | tr '\n' ' ')${N}"
+      labels+=("Remove leftovers"); actions+=(cmd_clean); hints+=("files of an install that stopped half-way; a private backup is kept")
+    fi
     if has_unmanaged; then labels+=("Adopt hand-installed units"); actions+=(cmd_adopt); hints+=("manage the hstun services you set up by hand"); fi
     for i in "${!labels[@]}"; do printf '  %d) %-28s %s\n' $((i + 1)) "${labels[$i]}" "${D}${hints[$i]}${N}"; done
     echo "  0) Exit"
@@ -1773,7 +1880,7 @@ menu() {
     case "$c" in *[!0-9]*) warn "choose a number"; continue ;; esac
     if [ "$c" -ge 1 ] && [ "$c" -le "${#labels[@]}" ]; then
       local rc=0
-      set +e; ( set -e; "${actions[$((c - 1))]}" ); rc=$?; set -e
+      set +e; run_action "${actions[$((c - 1))]}"; rc=$?; set -e
       [ "$rc" = 0 ] || warn "that action stopped with an error (see above)"
       read -r -p "Press Enter to return to the menu " c <&9 || exit 0
     else warn "choose a number from the list"; fi
@@ -1788,9 +1895,10 @@ hstun installer/manager $INSTALLER_VERSION
   install.sh exit  [flags]            install the server side
   install.sh entry [flags]            install the client side
   install.sh adopt [--dry-run] [--unit U]   register hand-installed hstun units (writes one small file per instance, changes nothing else)
-  hstun-ctl status|test|doctor|logs|restart|edit|update|rollback|show-join|show-secret|backup|restore|uninstall|forget|version   (installed by the first run)
+  hstun-ctl status|test|doctor|logs|restart|edit|update|rollback|show-join|show-secret|backup|restore|uninstall|clean|forget|version   (installed by the first run)
     test       end-to-end check of the tunnel         doctor   checks of this host, certificate, DNS, firewall, then test
     edit       change settings, undone if the tunnel does not come back
+    clean      remove leftovers of an install that stopped half-way (backs them up first)
     rollback   go back to the previous binary          backup FILE / restore FILE [--test]   all instances in one private archive
     rotate-secret [--finish | --join CODE]   new secret without downtime (exit starts, entries follow, exit finishes)
     pin VERSION | pin --clear   make update install exactly one release (keep every host on the same one)
@@ -1820,7 +1928,7 @@ EOF
 CMD=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    exit | entry | status | logs | restart | update | show-join | show-secret | uninstall | adopt | forget | test | doctor | edit | rollback | backup | restore | rotate-secret | pin | version | menu | help) CMD=$1 ;;
+    exit | entry | status | logs | restart | update | show-join | show-secret | uninstall | clean | adopt | forget | test | doctor | edit | rollback | backup | restore | rotate-secret | pin | version | menu | help) CMD=$1 ;;
     install) ;;
     --name) NAME=$2; shift ;;
     --yes | -y) YES=1 ;;
@@ -1899,6 +2007,7 @@ case "$CMD" in
   show-join) cmd_show_join ;;
   show-secret) cmd_show_secret ;;
   uninstall) cmd_uninstall ;;
+  clean) cmd_clean ;;
   adopt) cmd_adopt ;;
   forget) cmd_forget ;;
   test) cmd_test ;;

@@ -37,6 +37,18 @@ Pick another public port with `--port`, or stop the service that holds it (`ss -
 
 `hstun-ctl update` checks every config with the new binary first, and if the tunnel does not come back healthy it restores the previous binary by itself. `hstun-ctl rollback` goes back manually. `hstun-ctl edit` undoes a settings change the same way.
 
+## "found leftovers of an unfinished install" / "found an hstun setup ... not installed by hstun-ctl"
+
+An install that stops half-way (an error, Ctrl+C) used to leave config files behind without telling `hstun-ctl`; since 0.5.1 a first install that fails removes what it wrote. Leftovers from an older run show as:
+
+```
+hstun-ctl clean            # backs them up (private archive in /root), then removes them
+hstun-ctl clean --name X   # one instance
+```
+
+`hstun-ctl exit --yes` does the same before installing. The menu shows "Remove leftovers" when it finds some. If a systemd unit still runs from that directory, it is not a leftover: `hstun-ctl adopt` registers it, or pick another `--name`.
+If your shell was inside the removed directory, bash prints `shell-init: ... getcwd` on every command until you run `cd /`.
+
 ## Remove everything
 
 `hstun-ctl uninstall --purge` removes the units, firewall rules, configuration, secret, certificate and decoy of that instance, and the binary when no instance is left. Without `--purge` the settings are kept.

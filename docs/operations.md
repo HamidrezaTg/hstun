@@ -20,6 +20,7 @@
 | `hstun-ctl backup [FILE]` | one private `.tar.gz` with every instance: settings, secrets, certificates, units |
 | `hstun-ctl restore FILE [--test]` | check a backup (`--test`), or restore it |
 | `hstun-ctl adopt [--dry-run] [--unit U]` / `forget` | bring a hand-installed setup under `hstun-ctl`, or stop managing it |
+| `hstun-ctl clean [--name N]` | remove leftovers of an install that stopped half-way (config files, no service, no `install.conf`); a private backup is written first |
 | `hstun-ctl uninstall [--purge]` | remove the units and firewall rules; `--purge` also deletes config, secret, decoy and, when no instance is left, the binary |
 
 Re-running the installer for an instance that exists shows what it has and asks: keep it, change settings (certificate, secret and paths stay, so
