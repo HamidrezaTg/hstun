@@ -34,7 +34,7 @@ On the entry host (direct mode, where the entry dials the exit):
 ```bash
 hstun-ctl test --matrix            # every carrier (ws, http, chunk) x TLS fingerprint (go, chrome, chrome_nopq, firefox)
 hstun-ctl test --matrix --quick    # shorter soak, smaller transfers
-hstun probe -config /etc/hstun/client.toml -carrier ws -fingerprint chrome -tls-fragment both   # one row, human or -json
+hstun probe -config /etc/hstun/client.toml -carrier ws -fingerprint chrome -fragment tcp   # one row, human or -json
 ```
 
 Each row opens its own tunnel session (the running tunnel is not touched) and measures: how long the session takes to come up;

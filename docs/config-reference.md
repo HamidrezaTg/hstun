@@ -47,7 +47,7 @@ Traffic shaping (see [security](security.md) and [stealth plan](stealth-plan.md)
 | key | default | meaning |
 |---|---|---|
 | `padding` | `light` | `off`, `light` (small records get 0-400 random bytes) or `strong` (the first 16 records look like 900-1400 byte ones, small ones get more). Used only when the peer announced that it reads padding, so a 0.4 or older peer sees no change; keepalives also carry a random-size filler |
-| `tls_fragment` | `off` | `tcp` (the first TLS record leaves as small TCP segments a few ms apart), `record` (re-framed as several TLS records), `both`. Defeats filters that read only the first packet; adds a few ms per connection |
+| `tls_fragment` | `off` | `tcp` (the first TLS record leaves as small TCP segments a few ms apart), `record` (re-framed as several TLS records), `both`. Defeats filters that read only the first packet; adds a few ms per connection. **Measured 2026-11-14 from an Iran-side host to an nginx exit: `tcp` worked, `record` and `both` broke the tunnel (the session came up, data did not flow), probably something on the path reacting to a hello split across TLS records. Use `tcp`, and check any mode with `hstun-ctl test --matrix` first** |
 | `session_age` | `auto` | replace a carrier session on a timer: `auto` is a random 10-40 minutes, `off`, or a duration (varied by +-25 %, at least 1m). The old session takes no new streams, finishes its own (up to 2 minutes), then closes. Needs `conns` of 2 or more; ignored by the chunk carrier |
 | `disable_probe` | `false` | exit role: refuse the measuring streams `hstun probe` opens |
 

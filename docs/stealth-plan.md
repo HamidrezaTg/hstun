@@ -49,7 +49,7 @@ Each item has an id used by the benchmark. "Effort" is a rough estimate for one 
 
 | id | item | from | effort | expected effect | cost | status |
 |---|---|---|---|---|---|---|
-| T2 | split the first TLS record (ClientHello) into several TCP segments or TLS records (`tls_fragment`: off, tcp, record, both) | Xray `fragment` | 0.5 d | beats SNI filters that do not reassemble | a few ms on connect | **built, off by default; measure (B2)** |
+| T2 | split the first TLS record (ClientHello) into several TCP segments or TLS records (`tls_fragment`: off, tcp, record, both) | Xray `fragment` | 0.5 d | beats SNI filters that do not reassemble | a few ms on connect | **built, off by default. B2 on one Iran-side path: `tcp` passes, `record` and `both` break the tunnel, so only `tcp` is a candidate** |
 | T3 | jittered keepalive interval (+-40 %) and random-size filler with each ping | C-Tunnel, BackPack lessons | 0.5 d | removes the fixed-period heartbeat | none | **built, on; measure (B4)** |
 | T4 | carrier metadata out of `X-Hs-Sid/Seq/Ack/Tag/Mx` into cookies named from the secret path (old and new ends interoperate) | NipoVPN | 1 d | a CDN or middlebox no longer sees a tool signature | none | **built, on** |
 | T5 | browser-like header set on the HTTP carriers (Accept, Accept-Language, Origin, Sec-Fetch-*, Sec-CH-UA per profile; no ordering: Go sorts headers) | Xray `browser.go` | 0.5 d | only visible after TLS termination (CDN path) | none | **built, on** |

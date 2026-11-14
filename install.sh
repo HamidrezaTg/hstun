@@ -1339,6 +1339,16 @@ cmd_test_matrix() { # entry: every carrier x TLS fingerprint through `hstun prob
       fi
     done
   done
+  # the ClientHello fragmentation modes on the best ws fingerprint (record-level splitting broke one real path)
+  if [ -n "$best" ]; then
+    f=${best#* }
+    for fr in tcp record; do
+      out=$("$bin" probe -config "$cfg" -carrier ws -fingerprint "$f" -fragment "$fr" -soak 5s -idle 2s -bulk 1048576 -json 2>/dev/null) || true
+      [ -n "$out" ] || continue
+      v=$(printf '%s' "$out" | jq -r '.verdict'); ms=$(printf '%s' "$out" | jq -r '.connect_ms|floor')
+      printf '%-7s %-12s %-9s %7s ms   (tls_fragment=%s)\n' ws "$f" "$v" "$ms" "$fr"
+    done
+  fi
   # what a stranger sees on the same port: the front page and a path nobody has
   line=$(curl -sk -m 8 -o /dev/null -w '%{http_code}' "https://$server/" 2>/dev/null || echo "-")
   out=$(curl -sk -m 8 -o /dev/null -w '%{http_code}' "https://$server/$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')" 2>/dev/null || echo "-")

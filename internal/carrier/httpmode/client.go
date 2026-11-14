@@ -89,7 +89,6 @@ func Dial(ctx context.Context, o carrier.Options, key []byte, name string) (net.
 	fail := failAfter
 	tlsTimeout := 10 * time.Second
 	if o.Chunk {
-		defer func() { println("DEBUG sizes", upSize, downMax) }()
 		par := orDefault(o.ChunkPar, DefaultChunkPar)
 		nUp, nDown = par, par
 		upSize = min(orDefault(o.ChunkUp, DefaultChunkUp), upChunk)
@@ -574,7 +573,6 @@ const growAfter = 3 * time.Minute
 // a chunk that is already numbered cannot be cut smaller, so the next session
 // starts with smaller sizes instead.
 func (c *clientConn) stuck() {
-	println("DEBUG stuck; sizes", c.upSize, c.downMax, time.Since(c.born).String())
 	c.failed.Store(true)
 	if c.tuning != nil {
 		c.tuning.Shrink()
