@@ -355,3 +355,40 @@ func TestSessionsRotateWithoutCuttingStreams(t *testing.T) {
 		t.Fatalf("only %d distinct session ids in 9 s with a 2 s age: sessions were not replaced", len(ids))
 	}
 }
+
+// The same in reverse mode, where the replaced sessions belong to the exit and the
+// entry (server) picks them: streams keep working through every replacement.
+func TestSessionsRotateInReverseMode(t *testing.T) {
+	e := startServer(t, []string{"ws"})
+	cfg := &config.ClientFile{
+		Client: config.ClientSection{
+			Server: e.tunnel, Carrier: "ws", Conns: 2, SessionAge: "2s",
+			SecretFile: e.secret, Name: "test", WSPath: "/hs/ws", HTTPPath: "/hs/h",
+			TLSVerify: "ca_file", CAFile: e.certPath, Ping: "2s", IdleTimeout: "30s", MaxStreamsPerSession: 256,
+		},
+		Forward: []config.Forward{{Name: "x1", Target: e.echo}},
+	}
+	c, err := client.New(cfg, e.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, 10*time.Second, func() bool { return e.srv.Sessions() >= 2 })
+	ids := map[uint64]bool{}
+	deadline := time.Now().Add(9 * time.Second)
+	for n := 0; time.Now().Before(deadline); n++ {
+		if err := roundTrip(e.fwd, 4<<10); err != nil {
+			t.Fatalf("round trip %d during rotation: %v", n, err)
+		}
+		for _, s := range e.srv.SessionList() {
+			ids[s.ID] = true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if len(ids) < 5 {
+		t.Fatalf("only %d distinct session ids: sessions were not replaced", len(ids))
+	}
+}

@@ -107,6 +107,10 @@ func Handler(onConn func(c net.Conn, r *http.Request)) http.Handler {
 		}
 		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			CompressionMode: websocket.CompressionDisabled,
+			// The tunnel is authenticated by the handshake, not by where a page came from, and
+			// behind a reverse proxy the Host seen here may differ from the client's Origin
+			// (nginx drops the port), which the default check would turn into a 403.
+			OriginPatterns: []string{"*"},
 		})
 		if err != nil {
 			return // Accept already wrote the HTTP error

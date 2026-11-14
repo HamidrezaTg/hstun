@@ -142,16 +142,27 @@ func (h *Hub) CloseAll() {
 	}
 }
 
-// candidates returns live sessions under the stream cap, least loaded first.
+// candidates returns live sessions under the stream cap, least loaded first. A
+// session that is being replaced (Draining) is used only when nothing else is
+// there: between the old session being flagged and the new one coming up there
+// can be a moment with no other session, and a stream then is better served
+// by the old one than refused.
 func (h *Hub) candidates() []*Session {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	var out []*Session
+	var out, drain []*Session
 	for _, s := range h.sessions {
-		if s.Mux.IsClosed() || s.Draining.Load() || s.Mux.NumStreams() >= h.maxStreams {
+		if s.Mux.IsClosed() || s.Mux.NumStreams() >= h.maxStreams {
 			continue
 		}
-		out = append(out, s)
+		if s.Draining.Load() {
+			drain = append(drain, s)
+		} else {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		out = drain
 	}
 	for i := 1; i < len(out); i++ {
 		for j := i; j > 0 && out[j].Mux.NumStreams() < out[j-1].Mux.NumStreams(); j-- {

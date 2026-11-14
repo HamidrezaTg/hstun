@@ -46,6 +46,9 @@ type Client struct {
 	drain time.Duration
 
 	pick *picker
+	// fresh counts sessions that are up and not being replaced; an exit-role session that is
+	// being replaced still takes streams when this is zero (the replacement is not up yet).
+	fresh atomic.Int32
 
 	hub   *entry.Hub   // role entry
 	entry *entry.Entry // role entry
@@ -253,6 +256,9 @@ func (c *Client) slot(ctx, hard context.Context, i int) {
 	}
 }
 
+// drainSettle is how long a replaced session is kept before it may be closed for having no streams.
+const drainSettle = 3 * time.Second
+
 // errRotated is what session returns when it ended the old session on purpose.
 var errRotated = errors.New("session rotated")
 
@@ -370,13 +376,22 @@ func (c *Client) session(ctx context.Context, slot int, name string) (up bool, e
 		}()
 	}
 	var draining atomic.Bool
+	var counted atomic.Bool // this session is included in c.fresh
+	c.fresh.Add(1)
+	counted.Store(true)
+	leave := func() {
+		if counted.CompareAndSwap(true, false) {
+			c.fresh.Add(-1)
+		}
+	}
+	defer leave()
 	var sessRef atomic.Pointer[entry.Session]            // the hub entry of an entry-role session
 	onCaps := func(string) { conn.SetPeerPadding(true) } // the peer announced that it reads padding
 	mux.Announce(ms)
 	done := make(chan error, 1)
 	go func() {
 		if c.exit != nil {
-			done <- c.exit.ServeLimited(ctx, ms, func() bool { return !draining.Load() }, onCaps)
+			done <- c.exit.ServeLimited(ctx, ms, func() bool { return !draining.Load() || c.fresh.Load() == 0 }, onCaps)
 			return
 		}
 		sess := &entry.Session{
@@ -408,10 +423,17 @@ func (c *Client) session(ctx context.Context, slot int, name string) (up bool, e
 	// Planned replacement: stop taking new streams here, let the ones running finish.
 	c.log.Info("replacing an old session", "slot", slot, "carrier", name)
 	draining.Store(true)
+	leave()
 	if s := sessRef.Load(); s != nil {
 		s.Draining.Store(true) // the hub stops picking it for new streams
 	}
 	go func() {
+		// A stream that was being opened when the flag went up is not counted yet: wait
+		// before believing "no streams" (opening takes milliseconds, this is generous).
+		select {
+		case <-time.After(drainSettle):
+		case <-ms.CloseChan():
+		}
 		grace := time.NewTimer(2 * time.Minute)
 		defer grace.Stop()
 		for ms.NumStreams() > 0 {

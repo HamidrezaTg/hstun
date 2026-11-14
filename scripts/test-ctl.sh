@@ -98,14 +98,26 @@ grep -q "going back to the previous one" "$T/upd1.log" || fail "update did not s
 ok "update rolls back automatically when the tunnel does not come back"
 "$T/bin/hstun-ctl" update >"$T/upd2.log" 2>&1 || { cat "$T/upd2.log"; fail "update"; }
 [ "$(sum "$T/bin/hstun")" != "$old" ] && [ "$(sum "$T/bin/hstun.prev")" = "$old" ] || fail "update did not install the new binary and keep .prev"
+# a binary that is running right now (a restarted unit) must be replaceable: cp onto it fails with "Text file busy"
+"$T/bin/hstun" probe -config "$T/etc/hstun-e1/client.toml" -carrier ws -soak 30s -idle 0 -bulk 0 >/dev/null 2>&1 & busy=$!; pids+=("$busy"); sleep 1.5
+kill -0 "$busy" 2>/dev/null || fail "the probe that keeps the binary busy ended early"
 "$T/bin/hstun-ctl" rollback --yes >/dev/null 2>&1 || fail "rollback"
 [ "$(sum "$T/bin/hstun")" = "$old" ] || fail "rollback did not restore the previous binary"
 ok "update keeps the previous binary and rollback restores it"
 # --- rotate-secret: exit adds a second secret, the entry follows, the exit finishes ---
-sessions() { curl -s -m 2 "http://$admin/stats" 2>/dev/null | grep -o '"carrier"' | wc -l; }
+sessions() { curl -s -m 2 "http://$admin/stats" 2>/dev/null | grep -o '"id":' | wc -l; }
 restart_server() { kill "$spid" 2>/dev/null || true; sleep 0.5; "$T/bin/hstun" server -config "$T/etc/hstun/server.toml" >>"$T/server.log" 2>&1 & spid=$!; pids+=("$spid"); sleep 1; }
 restart_client() { kill "$cpid" 2>/dev/null || true; sleep 0.5; "$T/bin/hstun" client -config "$T/etc/hstun-e1/client.toml" >>"$T/client.log" 2>&1 & cpid=$!; pids+=("$cpid"); for _ in $(seq 1 20); do [ "$(sessions)" -ge 1 ] && return 0; sleep 0.5; done; return 1; }
 "$T/bin/hstun-ctl" edit --yes --port "$base" >/dev/null 2>&1 || fail "edit back to the original port"
+# --- a stopped exit must not look healthy (the session count once counted a stats field that always exists) ---
+kill "$spid" 2>/dev/null || true
+for _ in $(seq 1 20); do [ "$(sessions)" -eq 0 ] && break; sleep 0.5; done
+[ "$(sessions)" -eq 0 ] || fail "the entry still reports sessions with the exit stopped"
+if "$T/bin/hstun-ctl" --name e1 test >"$T/nos.log" 2>&1; then cat "$T/nos.log"; fail "test passed with no tunnel session"; fi
+grep -q "no tunnel session" "$T/nos.log" || { cat "$T/nos.log"; fail "test did not say there is no session"; }
+restart_server
+restart_client || fail "the entry did not reconnect to the restarted exit"
+ok "with the exit stopped the entry shows no session and test fails"
 old_secret=$(sum "$T/etc/hstun/secret")
 "$T/bin/hstun-ctl" rotate-secret >"$T/rot.log" 2>&1 || { cat "$T/rot.log"; fail "rotate-secret start"; }
 grep -q 'secret_files = \[.*secret", ".*secret.new"\]' "$T/etc/hstun/server.toml" || fail "server does not list both secrets"

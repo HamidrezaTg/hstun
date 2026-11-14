@@ -166,7 +166,12 @@ func (o Options) browserHeaders(r *http.Request) {
 	if fp == FingerprintAndroid {
 		return
 	}
-	set("Origin", "https://"+r.URL.Host)
+	if !ws {
+		// Not on the WebSocket upgrade: a server that checks Origin against the Host it was
+		// given (coder/websocket does) rejects a browser-style Origin with a port when a
+		// reverse proxy hands it the Host without the port, which is what nginx does.
+		set("Origin", "https://"+r.URL.Host)
+	}
 	if ws {
 		set("Sec-Fetch-Dest", "websocket")
 		set("Sec-Fetch-Mode", "websocket")

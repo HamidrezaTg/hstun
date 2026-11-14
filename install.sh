@@ -237,6 +237,10 @@ save_conf() {
   chmod 0600 "$ETC/install.conf"
 }
 reset_conf() { local k; for k in "${CONF_KEYS[@]}"; do printf -v "$k" '%s' ""; done; }
+put_file() { # SRC DST: replace a binary that may be running (copy beside it, then rename; cp onto a running binary fails with "Text file busy")
+  local t="$2.new.$$"
+  cp -p "$1" "$t" && mv -f "$t" "$2"
+}
 inst_bin() { echo "${ADOPT_BIN:-$BIN_DIR/hstun}"; }
 # an existing hstun that this script did not create must never be overwritten by an install
 guard_existing() { # ROLE-WANTED
@@ -966,7 +970,7 @@ install_entry() {
   if have_systemd || [ "$TEST" = 1 ]; then
     local n=0
     for _ in $(seq 1 30); do
-      n=$(curl -s -m 2 "http://127.0.0.1:$ADMIN_PORT/stats" 2>/dev/null | grep -o '"carrier"' | wc -l || true)
+      n=$(curl -s -m 2 "http://127.0.0.1:$ADMIN_PORT/stats" 2>/dev/null | grep -o '"id":' | wc -l || true)
       [ "${n:-0}" -ge 1 ] && break
       sleep 1
     done
@@ -1087,8 +1091,8 @@ cmd_update() {
       for u in $(daemon_units); do sysd restart "$u"; done
       if ! health_ok; then
         warn "instance ${NAME:-default} did not come back healthy with the new binary: going back to the previous one"
-        [ -f "$BIN_DIR/hstun.prev" ] && cp -p "$BIN_DIR/hstun.prev" "$BIN_DIR/hstun"
-        [ -n "$ADOPT_BIN" ] && [ -f "$ADOPT_BIN.prev" ] && cp -p "$ADOPT_BIN.prev" "$ADOPT_BIN"
+        [ -f "$BIN_DIR/hstun.prev" ] && put_file "$BIN_DIR/hstun.prev" "$BIN_DIR/hstun"
+        [ -n "$ADOPT_BIN" ] && [ -f "$ADOPT_BIN.prev" ] && put_file "$ADOPT_BIN.prev" "$ADOPT_BIN"
         for u in $(daemon_units); do sysd restart "$u"; done
         exit 1
       fi
@@ -1274,7 +1278,7 @@ cmd_forget() { # stop managing an adopted instance; units, config and binary sta
 listening() { ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q .; }
 sessions_of() { # admin port: number of live sessions, empty when the admin page does not answer
   local a; a=$(curl -s -m 2 "http://127.0.0.1:$1/stats" 2>/dev/null || true)
-  [ -n "$a" ] && printf '%s' "$a" | grep -o '"carrier"' | wc -l
+  [ -n "$a" ] && printf '%s' "$a" | grep -o '"id":' | wc -l
   return 0
 }
 # health_ok: the loaded instance is running and, within 25 seconds, ready (entry: a session is up; exit: its port listens)
@@ -1480,7 +1484,7 @@ cmd_rollback() { # put the previous binary back (the .prev copy every update lea
   local b; b=$(inst_bin)
   [ -f "$b.prev" ] || die "no previous binary ($b.prev) to go back to"
   confirm "Go back from $("$b" version 2>/dev/null) to $("$b.prev" version 2>/dev/null)?" n || { info "nothing changed"; return 0; }
-  cp -p "$b" "$b.next"; cp -p "$b.prev" "$b"; mv "$b.next" "$b.prev"
+  cp -p "$b" "$b.next"; put_file "$b.prev" "$b"; mv "$b.next" "$b.prev"
   local u; for u in $(daemon_units); do sysd restart "$u"; done
   info "rolled back to $("$b" version 2>/dev/null) (the newer one is kept as $b.prev, run rollback again to return)"
 }
@@ -1624,7 +1628,7 @@ instance_line() { # config directory: one status line
     [ -n "$unit" ] && st=$(systemctl is-active "$unit" 2>/dev/null || true)
     if [ -n "$ADMIN_PORT" ]; then
       a=$(curl -s -m 1 "http://127.0.0.1:$ADMIN_PORT/stats" 2>/dev/null || true)
-      [ -n "$a" ] && sess=$(printf '%s' "$a" | grep -o '"carrier"' | wc -l)
+      [ -n "$a" ] && sess=$(printf '%s' "$a" | grep -o '"id":' | wc -l)
     fi
     local what=${MODE:-${CARRIER:-}}
     printf '  %-10s %-6s %-12s %-9s %s\n' "${NAME:-default}" "$ROLE" "$what" "${st:-?}" "${sess:+$sess session(s)}"

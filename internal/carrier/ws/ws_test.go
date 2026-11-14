@@ -5,9 +5,13 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"hstun/internal/carrier"
 	"hstun/internal/carrier/ws"
@@ -20,6 +24,7 @@ type seen struct {
 	proto  []string
 	resume []bool
 	ua     []string
+	origin []string
 }
 
 // The websocket client has to look like an ordinary HTTPS client on the wire:
@@ -50,6 +55,7 @@ func TestDialLooksLikeOrdinaryHTTPSClient(t *testing.T) {
 		s.proto = append(s.proto, r.TLS.NegotiatedProtocol)
 		s.resume = append(s.resume, r.TLS.DidResume)
 		s.ua = append(s.ua, r.UserAgent())
+		s.origin = append(s.origin, r.Header.Get("Origin"))
 		s.mu.Unlock()
 		_ = c.Close()
 	})}
@@ -87,6 +93,13 @@ func TestDialLooksLikeOrdinaryHTTPSClient(t *testing.T) {
 			t.Errorf("conn %d: User-Agent %q", i, s.ua[i])
 		}
 	}
+	for i, o := range s.origin {
+		// A WebSocket server that checks Origin against the Host it sees (and nginx hands it a Host
+		// without the port) answers 403 to a browser-style Origin: clients send none on the upgrade.
+		if o != "" {
+			t.Errorf("conn %d: the upgrade carries Origin %q", i, o)
+		}
+	}
 	if s.resume[0] || !s.resume[1] {
 		t.Errorf("TLS resumption: first=%v second=%v, want false then true", s.resume[0], s.resume[1])
 	}
@@ -114,3 +127,27 @@ type recorder struct {
 func (r *recorder) Header() http.Header         { return r.h }
 func (r *recorder) Write(b []byte) (int, error) { return len(b), nil }
 func (r *recorder) WriteHeader(c int)           { r.code = c }
+
+// The server must accept an upgrade whatever Origin it carries (a reverse proxy can make
+// Origin and Host disagree), and still refuse a wrong secret path or a plain request.
+func TestHandlerAcceptsAnyOrigin(t *testing.T) {
+	got := make(chan struct{}, 1)
+	srv := httptest.NewServer(ws.Handler(func(c net.Conn, _ *http.Request) { got <- struct{}{}; c.Close() }))
+	defer srv.Close()
+	for _, origin := range []string{"https://hel.example.org:2083", "https://elsewhere.example", "http://127.0.0.1"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), &websocket.DialOptions{
+			HTTPHeader: http.Header{"Origin": {origin}},
+		})
+		cancel()
+		if err != nil {
+			t.Fatalf("Origin %q rejected: %v", origin, err)
+		}
+		c.CloseNow()
+		select {
+		case <-got:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("Origin %q: the handler never ran", origin)
+		}
+	}
+}
