@@ -132,5 +132,6 @@ ok "menu shows the installed instances and only the relevant items"
 
 for n in e1 ""; do ./install.sh uninstall --yes --purge ${n:+--name "$n"} >/dev/null 2>&1 || fail "uninstall ${n:-default}"; done
 [ -z "$(ls -A "$T/etc" 2>/dev/null)" ] && [ ! -e "$T/bin/hstun" ] && [ -z "$(ls -A "$T/systemd")" ] || fail "files left after --purge"
-ok "uninstall --purge leaves nothing"
+[ -x "$T/bin/hstun-ctl" ] || fail "hstun-ctl was removed with the last instance"
+ok "uninstall --purge leaves nothing but hstun-ctl (kept so you can install again)"
 echo "install.sh staging test passed"

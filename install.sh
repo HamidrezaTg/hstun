@@ -184,6 +184,11 @@ fetch_release() {
   if [ -n "$WANT_VERSION" ]; then api="https://api.github.com/repos/$REPO/releases/tags/v${WANT_VERSION#v}"; else api="https://api.github.com/repos/$REPO/releases/latest"; fi
   json=$(gh_curl -H "Accept: application/vnd.github+json" "$api") || die "cannot read the release at $api. For a private repository export GITHUB_TOKEN (Contents: read)."
   tag=$(jq -r .tag_name <<<"$json"); ver=${tag#v}
+  # this script is newer than the newest release (main branch, or a release that was not published yet): the binary it
+  # downloads then lacks the features the script talks about
+  if [ -z "$WANT_VERSION" ] && [ "$ver" != "$INSTALLER_VERSION" ] && [ "$(printf '%s\n%s\n' "$ver" "$INSTALLER_VERSION" | sort -V | tail -n1)" = "$INSTALLER_VERSION" ]; then
+    warn "this installer is $INSTALLER_VERSION but the newest published release is $ver, so you get hstun $ver. For $INSTALLER_VERSION wait for its release, or build from source: HSTUN_BUILD=1"
+  fi
   name="hstun_${ver}_linux_${arch}.tar.gz"
   url=$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .url' <<<"$json")
   surl=$(jq -r '.assets[] | select(.name=="SHA256SUMS") | .url' <<<"$json")
@@ -850,6 +855,8 @@ print_exit_summary() {
   echo
   info "${B}exit installed${N} (mode $MODE${NAME:+, instance $NAME})"
   echo "  config   $ETC/server.toml    secret $ETC/secret    forward x1 -> $FORWARD_TARGET"
+  local ft=$FORWARD_TARGET
+  tcp_ok "$(unbracket "${ft%:*}")" "${ft##*:}" 2 || warn "nothing accepts connections on $ft yet: the tunnel will come up, but traffic needs your proxy (for example a VLESS inbound) listening there"
   echo "  manage   hstun-ctl${NAME:+ --name $NAME} status | logs | restart | update | show-join | uninstall"
   if [ "$MODE" = cloudflared ]; then
     echo
@@ -1135,7 +1142,10 @@ cmd_uninstall() {
     info "removed $ETC (configuration, secret and certificate)"
     local left=0 d
     for d in "$ETC_BASE"/hstun "$ETC_BASE"/hstun-*; do [ -f "$d/install.conf" ] && left=$((left + 1)); done
-    if [ "$left" = 0 ]; then rm -f "${BIN_DIR:?}/hstun" "$BIN_DIR/hstun.prev" "$BIN_DIR/hstun-ctl"; rm -rf "${SHARE_DIR:?}"; info "no instances left: removed the binary and shared files"; fi
+    if [ "$left" = 0 ]; then
+      rm -f "${BIN_DIR:?}/hstun" "$BIN_DIR/hstun.prev"; rm -rf "${SHARE_DIR:?}"
+      info "no instances left: removed the binary and shared files; $BIN_DIR/hstun-ctl stays so you can install again (delete it with: rm $BIN_DIR/hstun-ctl)"
+    fi
   else
     [ -n "$ADOPTED" ] && rm -f "${ETC:?}/install.conf"
     info "services removed; configuration and secret kept in $ETC (add --purge to delete them)"
