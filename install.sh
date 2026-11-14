@@ -15,7 +15,7 @@
 # so it runs unattended with --yes. See README.md ("Install").
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.4.0"
+INSTALLER_VERSION="0.5.0"
 REPO="${HSTUN_REPO:-HamidrezaTg/hstun}"
 WANT_VERSION="${HSTUN_VERSION:-}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
@@ -209,6 +209,7 @@ NAME=""
 ROLE="" MODE="" FORWARD_TARGET="" PORT="" DOMAIN="" CERT="" KEY="" ACME="" EMAIL="" ALLOW_FROM="" DECOY_DIR="" BACKEND_PORT=""
 JOIN="" JOIN_SECRET="" NO_SECRET=0 SERVER="" CARRIER="" WS_PATH="" HTTP_PATH="" SECRET_FILE="" SECRET_FROM="" TLS_VERIFY="" SPKI="" CONNECT="" SNI=""
 FORWARD_LISTEN="" FORWARD_NAME="" CONNS="" CHUNK_PARALLEL="" SOCKS_LISTEN="" NO_FW="" ADMIN_PORT="" SELF_SIGNED="" PUBLIC_ADDR=""
+MAX_MBIT="" MAX_NEW_STREAMS="" DRAIN_TIMEOUT=""
 FOLLOW=0 PURGE=0 ALL=0 IPV6="" FINISH=0 SECRET_OVERRIDE="" EDIT_MODE=0 FILE="" FILE_TEST=0 FORCE=0 RECONFIGURE=0 REINSTALL=0 NEW_CERT=0 CUSTOMIZE=0 SKIP_LOAD="" DRY_RUN=0 ADOPT_ONLY=""
 ADOPTED="" ADOPT_UNITS="" ADOPT_BIN=""
 
@@ -219,7 +220,7 @@ set_paths() {
 }
 CONF_KEYS=(ROLE MODE FORWARD_TARGET PORT DOMAIN CERT KEY BACKEND_PORT ADMIN_PORT WS_PATH HTTP_PATH SERVER CARRIER TLS_VERIFY SPKI CONNECT SNI
   FORWARD_LISTEN FORWARD_NAME CONNS CHUNK_PARALLEL SOCKS_LISTEN ALLOW_FROM PUBLIC_ADDR FW_PORTS CONNLIMIT_PORT SELF_SIGNED
-  ADOPTED ADOPT_UNITS ADOPT_BIN IPV6)
+  ADOPTED ADOPT_UNITS ADOPT_BIN IPV6 MAX_MBIT MAX_NEW_STREAMS DRAIN_TIMEOUT)
 FW_PORTS="" CONNLIMIT_PORT=""
 load_conf() { # saved values only fill what is still empty (flags win)
   [ -f "$ETC/install.conf" ] || return 0
@@ -557,8 +558,20 @@ $([ "$IPV6" = 1 ] && echo "        listen [::]:$PORT ssl http2;")
 }
 EOF
 }
+check_limits() { # --max-mbit, --max-new-streams and --drain-timeout, whichever were given
+  case "$MAX_MBIT" in "") ;; *[!0-9.]* | . | *.*.*) die "--max-mbit must be a number (megabits per second, 0 = no limit)" ;; esac
+  case "$MAX_NEW_STREAMS" in "") ;; *[!0-9]*) die "--max-new-streams must be a whole number (new streams per second, 0 = no limit)" ;; esac
+  case "$DRAIN_TIMEOUT" in "" | [0-9]*s | [0-9]*m) ;; *) die "--drain-timeout must look like 10s or 1m (0s = stop at once)" ;; esac
+}
 render_server_toml() {
-  local listen tls="" trust="" allow=""
+  local listen tls="" trust="" allow="" lim=""
+  check_limits
+  [ -n "$MAX_MBIT" ] && lim="${lim}max_mbit_per_key = $MAX_MBIT
+"
+  [ -n "$MAX_NEW_STREAMS" ] && lim="${lim}max_new_streams_per_sec_per_key = $MAX_NEW_STREAMS
+"
+  [ -n "$DRAIN_TIMEOUT" ] && lim="${lim}drain_timeout = \"$DRAIN_TIMEOUT\"
+"
   case "$MODE" in
     nginx) listen="127.0.0.1:$BACKEND_PORT"; trust='trust_proxy  = "loopback"' ;;
     cloudflared) listen="127.0.0.1:$BACKEND_PORT"; trust='trust_proxy  = "cloudflared"' ;;
@@ -593,7 +606,7 @@ max_streams_per_session = 256
 auth_fail_per_min_per_ip = 10
 idle_timeout    = "10m"
 admin_listen    = "127.0.0.1:$ADMIN_PORT"
-
+${lim}
 [[forward]]
 name   = "x1"
 target = "$FORWARD_TARGET"
@@ -605,7 +618,9 @@ allow_ports  = []
 EOF
 }
 render_client_toml() {
-  local verify="tls_verify  = \"system\"" conn="" sni="" socks="" ch="" conns=$CONNS
+  local verify="tls_verify  = \"system\"" conn="" sni="" socks="" ch="" drain="" conns=$CONNS
+  check_limits
+  [ -n "$DRAIN_TIMEOUT" ] && drain="drain_timeout = \"$DRAIN_TIMEOUT\""
   [ "$TLS_VERIFY" = spki ] && verify="tls_verify  = \"spki\"
 spki_sha256 = \"$SPKI\""
   [ -n "$CONNECT" ] && conn="connect     = \"$CONNECT\""
@@ -635,6 +650,7 @@ idle_timeout = "10m"
 max_streams_per_session = 256
 forward_max_conns_per_ip = 64
 admin_listen = "127.0.0.1:$ADMIN_PORT"
+$drain
 
 [[forward]]
 name   = "$FORWARD_NAME"
@@ -868,8 +884,8 @@ install_entry() {
   ROLE=entry
   [ -n "$JOIN" ] && parse_join
   ask SERVER "Exit address (host:port)" ""
-  ask CARRIER "Carrier (ws, http or chunk; chunk is for paths that cut long connections)" ws
-  case "$CARRIER" in ws | http | chunk) ;; *) die "--carrier must be ws, http or chunk" ;; esac
+  ask CARRIER "Carrier (ws, http, chunk or auto; chunk is for paths that cut long connections, auto fails over by itself)" ws
+  case "$CARRIER" in ws | http | chunk | auto) ;; *) die "--carrier must be ws, http, chunk or auto" ;; esac
   ask WS_PATH "WebSocket path (from the join string)" ""
   ask HTTP_PATH "HTTP path (from the join string)" ""
   ask TLS_VERIFY "Certificate check (system = CA certificate, spki = pinned self-signed)" system
@@ -931,7 +947,7 @@ install_entry() {
   save_conf
   start_unit "$UNIT-client.service"
   save_conf
-  info "${B}entry installed${N}${NAME:+ (instance $NAME)}: $FORWARD_LISTEN -> $SERVER, carrier $CARRIER (${CARRIER/ws/WebSocket}), forward $FORWARD_NAME"
+  info "${B}entry installed${N}${NAME:+ (instance $NAME)}: $FORWARD_LISTEN -> $SERVER, carrier $CARRIER$(case "$CARRIER" in ws) echo " (WebSocket)" ;; auto) echo " (ws, then http, then chunk)" ;; esac), forward $FORWARD_NAME"
   case "${SERVER%:*}" in *[!0-9.]* | "") ;; *) [ "$TLS_VERIFY" = spki ] && echo "  note     the exit is an IP address, so no TLS server name is sent. That is normal with a pinned certificate." ;; esac
   if have_systemd || [ "$TEST" = 1 ]; then
     local n=0
@@ -1702,10 +1718,12 @@ hstun installer/manager $INSTALLER_VERSION
 Common:    --name NAME   --yes   --version X.Y.Z   --repo OWNER/REPO   --no-firewall
 Exit:      --mode nginx|direct|cloudflared   --forward-target HOST:PORT   --port N   --domain D
            --cert FILE --key FILE | --acme [--email E]   --allow-from CIDR[,CIDR]   --decoy-dir DIR   --public-addr ADDR   --backend-port N
-Entry:     --join STRING   --server HOST:PORT   --carrier ws|http|chunk   --ws-path P   --http-path P
+Entry:     --join STRING   --server HOST:PORT   --carrier ws|http|chunk|auto   --ws-path P   --http-path P
            --secret-file FILE | --secret-from USER@HOST[:SSHPORT]   --tls-verify system|spki   --spki HEX
            --connect IP:PORT   --sni NAME   --forward-listen ADDR:PORT   --forward-name NAME   --conns N
            --chunk-parallel N   --socks ADDR:PORT
+Limits:    --max-mbit N (exit: megabits per second per key, each direction)   --max-new-streams N (exit: new streams per second per key)
+           --drain-timeout 10s (both: how long a stopping service lets connections in flight finish)
 Install:   --reconfigure (change an installed instance)   --reinstall (new certificate, secret, paths)   --new-cert   --customize (entry: ask the advanced questions)
 Manage:    --force (update even when current)   --purge (uninstall)   --all (update)   -f (logs)   --dry-run, --unit NAME (adopt)   --file FILE, --test (backup/restore)   --ipv6 / --no-ipv6 (exit listens on IPv6 too; default: detected)   --no-secret (show-join)
 
@@ -1752,6 +1770,9 @@ while [ $# -gt 0 ]; do
     --conns) CONNS=$2; shift ;;
     --chunk-parallel) CHUNK_PARALLEL=$2; shift ;;
     --socks) SOCKS_LISTEN=$2; shift ;;
+    --max-mbit) MAX_MBIT=$2; shift ;;
+    --max-new-streams) MAX_NEW_STREAMS=$2; shift ;;
+    --drain-timeout) DRAIN_TIMEOUT=$2; shift ;;
     --purge) PURGE=1 ;;
     --force) FORCE=1 ;;
     --finish) FINISH=1 ;;

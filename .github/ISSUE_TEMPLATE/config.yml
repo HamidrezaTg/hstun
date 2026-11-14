@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/HamidrezaTg/hstun/security/advisories/new
+    about: Report it privately. Please do not open a public issue for a vulnerability.
+  - name: Troubleshooting guide
+    url: https://github.com/HamidrezaTg/hstun/blob/main/docs/troubleshooting.md
+    about: Run `hstun-ctl doctor` first; the common problems are explained here.

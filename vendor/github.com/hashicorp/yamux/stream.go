@@ -395,12 +395,48 @@ func (s *Stream) closeTimeout() {
 	_ = s.session.sendNoWait(hdr)
 }
 
-// forceClose is used for when the session is exiting
+// forceClose is used for when the session is exiting.
+//
+// hstun patch: a stream whose peer had not finished sending (no FIN received)
+// is marked reset instead of cleanly closed, so a reader sees ErrConnectionReset
+// and not an EOF that looks like a complete transfer when the session died.
 func (s *Stream) forceClose() {
 	s.stateLock.Lock()
-	s.state = streamClosed
+	switch s.state {
+	case streamRemoteClose, streamClosed, streamReset:
+		s.state = streamClosed
+	default:
+		s.state = streamReset
+	}
 	s.stateLock.Unlock()
 	s.notifyWaiting()
+}
+
+// Reset aborts the stream (hstun patch). The peer's pending and future reads
+// and writes fail with ErrConnectionReset instead of ending with a clean EOF,
+// which lets a caller pass on "this transfer was cut" and not "this transfer
+// is complete". Data not yet read here is dropped. Safe to call more than once
+// and after Close.
+func (s *Stream) Reset() error {
+	s.stateLock.Lock()
+	if s.state == streamReset || s.state == streamClosed {
+		s.stateLock.Unlock()
+		return nil
+	}
+	if s.closeTimer != nil {
+		s.closeTimer.Stop()
+		s.closeTimer = nil
+	}
+	s.state = streamReset
+	s.stateLock.Unlock()
+	s.notifyWaiting()
+	s.session.closeStream(s.id)
+
+	s.sendLock.Lock()
+	defer s.sendLock.Unlock()
+	hdr := header(make([]byte, headerSize))
+	hdr.encode(typeWindowUpdate, flagRST, s.id, 0)
+	return s.session.sendNoWait(hdr)
 }
 
 // processFlags is used to update the state of the stream

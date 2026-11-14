@@ -21,6 +21,7 @@ name        = "client"
 tls_verify  = "system"
 ping        = "25s"
 idle_timeout = "10m"
+# drain_timeout = "10s"                    # how long a stopping client lets streams in flight finish (0s = at once)
 max_streams_per_session = 256
 forward_max_conns_per_ip = 64
 admin_listen = "127.0.0.1:9110"

@@ -15,6 +15,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"hstun/internal/auth"
@@ -25,6 +26,7 @@ import (
 	"hstun/internal/entry"
 	"hstun/internal/exit"
 	"hstun/internal/mux"
+	"hstun/internal/netx"
 	"hstun/internal/proto"
 	"hstun/internal/seal"
 )
@@ -38,6 +40,8 @@ type Client struct {
 	idle time.Duration
 	// stagger is the longest random delay before a non-first session's first dial.
 	stagger time.Duration
+	// drain is how long a stopping client lets the streams in flight finish.
+	drain time.Duration
 
 	pick *picker
 
@@ -75,8 +79,9 @@ func New(cfg *config.ClientFile, logger *slog.Logger) (*Client, error) {
 	ping, _ := time.ParseDuration(cfg.Client.Ping)
 	idle, _ := time.ParseDuration(cfg.Client.IdleTimeout)
 	stagger, _ := time.ParseDuration(cfg.Client.DialStagger)
+	drain, _ := time.ParseDuration(cfg.Client.DrainTimeout)
 	c := &Client{
-		cfg: cfg, log: logger, key: key, ping: ping, idle: idle, stagger: stagger,
+		cfg: cfg, log: logger, key: key, ping: ping, idle: idle, stagger: stagger, drain: drain,
 		opts: carrier.Options{
 			Server: cfg.Client.Server, Connect: cfg.Client.Connect, SNI: sni,
 			WSPath: cfg.Client.WSPath, HTTPPath: cfg.Client.HTTPPath, TLS: tc, UserAgent: cfg.Client.UserAgent,
@@ -122,21 +127,41 @@ func (c *Client) Sessions() int {
 	return c.hub.Count()
 }
 
-// Run starts `conns` independent slots and blocks until ctx is cancelled.
+// Run starts `conns` independent slots and blocks until ctx is cancelled and
+// the client has shut down. Cancelling ctx starts a graceful stop: the user
+// ports close, no new session is dialed or stream accepted, the streams in
+// flight get drain_timeout to finish, then the sessions are closed.
 func (c *Client) Run(ctx context.Context) {
+	hard, hardStop := context.WithCancel(context.Background())
+	defer hardStop()
+	var bg sync.WaitGroup
+	defer bg.Wait()
 	if c.entry != nil {
-		go c.entry.Serve(ctx)
+		bg.Add(1)
+		go func() { defer bg.Done(); c.entry.Serve(ctx) }()
 		if a := c.cfg.Client.AdminListen; a != "" {
-			go c.serveAdmin(ctx, a)
+			bg.Add(1)
+			go func() { defer bg.Done(); c.serveAdmin(ctx, a) }()
 		}
 	}
 	if c.pick.auto() {
-		go c.probeLoop(ctx)
+		bg.Add(1)
+		go func() { defer bg.Done(); c.probeLoop(ctx) }()
 	}
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		select {
+		case <-ctx.Done():
+			c.drainStreams()
+			hardStop()
+		case <-hard.Done():
+		}
+	}()
 	done := make(chan struct{}, c.cfg.Client.Conns)
 	for i := 0; i < c.cfg.Client.Conns; i++ {
 		go func(i int) {
-			c.slot(ctx, i)
+			c.slot(ctx, hard, i)
 			done <- struct{}{}
 		}(i)
 	}
@@ -145,8 +170,37 @@ func (c *Client) Run(ctx context.Context) {
 	}
 }
 
+// active is the number of streams in flight.
+func (c *Client) active() int {
+	if c.exit != nil {
+		return c.exit.Active()
+	}
+	return c.hub.ActiveStreams()
+}
+
+// drainStreams refuses new streams and waits (at most drain_timeout) for the
+// ones in flight.
+func (c *Client) drainStreams() {
+	if c.exit != nil {
+		c.exit.Drain()
+	}
+	n := c.active()
+	if n == 0 || c.drain <= 0 {
+		return
+	}
+	c.log.Info("draining: waiting for streams to finish", "streams", n, "timeout", c.drain.String())
+	if netx.WaitDrained(c.drain, c.active) {
+		c.log.Info("drained")
+	} else {
+		c.log.Warn("drain timeout: closing with streams still open", "streams", c.active())
+	}
+}
+
 // slot keeps one carrier session alive, reconnecting with jittered backoff.
-func (c *Client) slot(ctx context.Context, i int) {
+//
+// ctx ends the loop (a stop was requested); hard ends the running session, which
+// is later than ctx so streams in flight can drain.
+func (c *Client) slot(ctx, hard context.Context, i int) {
 	if d := staggerDelay(c.stagger, i); d > 0 {
 		select {
 		case <-ctx.Done():
@@ -158,7 +212,7 @@ func (c *Client) slot(ctx context.Context, i int) {
 	for ctx.Err() == nil {
 		start := time.Now()
 		name, _ := c.pick.current()
-		up, err := c.session(ctx, i)
+		up, err := c.session(hard, i)
 		if ctx.Err() != nil {
 			return
 		}

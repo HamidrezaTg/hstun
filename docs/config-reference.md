@@ -34,10 +34,20 @@ limits (`max_conns`, `max_conns_per_ip`, `auth_fail_per_min_per_ip`,
 `allow_from` source CIDRs), `admin_listen` (`/stats`, loopback), `[[forward]]`, `[socks]`
 or `[socks_exit]` depending on the role.
 
+Per-key limits and stopping (server; `0` = off):
+
+| key | default | meaning |
+|---|---|---|
+| `max_mbit_per_key` | off | megabits per second, **each direction**, shared by every session of one secret key. A key that moves more than this is slowed down by ordinary TCP back-pressure; nothing is dropped |
+| `max_new_streams_per_sec_per_key` | off | exit role: how many new streams the key may open per second (a burst of twice that, at least 10, is allowed). Over the rate the exit resets the stream, the entry fails that one connection; `/stats` counts `streams_throttled` |
+| `drain_timeout` | `10s` | how long a stopping process lets the streams in flight finish. See "Stopping" in [operations](operations.md). `0s` stops at once; also a key of `[client]` |
+
+These are per *key*, so with several entries that each have their own secret (several `secret_files`), one noisy entry cannot starve the others.
+
 Client (`deploy/client.example.toml`): `role`, `server`, optional `connect` (dial an IP
 while keeping the hostname for SNI/Host), `carrier` (`ws`, `http`, `chunk` or `auto`, which fails over ws → http → chunk; `auto_order` sets the list), `conns` (2 is enough; more connections did not measure faster), `dial_stagger`
 (spreads the first dials, default `2s`), `user_agent`, `tls_verify`
-(`system`, `ca_file` or `spki`; never off), `tls_mlkem` (default false; it worked to one host and broke the upgrade to another, so test each path before enabling), `[[forward]]`
+(`system`, `ca_file` or `spki`; never off), `tls_mlkem` (default false; it worked to one host and broke the upgrade to another, so test each path before enabling), `drain_timeout`, `[[forward]]`
 (`name` -> local `target`), `[socks_exit]` (`deny_private` refuses loopback,
 private, CGNAT, link-local and the host's own addresses).
 

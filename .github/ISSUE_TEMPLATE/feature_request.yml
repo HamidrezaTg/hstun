@@ -1,0 +1,23 @@
+name: Feature request
+description: An idea for hstun
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        hstun is plain transport engineering: real TLS, a real WebSocket or HTTP request, an authenticated handshake. It deliberately does
+        not imitate other protocols or copy a browser's TLS fingerprint, so requests for that are out of scope (see docs/security.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like hstun to do?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today instead?

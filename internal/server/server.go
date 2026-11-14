@@ -61,8 +61,22 @@ type Server struct {
 	certs   *certReloader // nil when serving plain HTTP behind a local proxy
 	started time.Time
 
+	drain    time.Duration // how long a stopping server lets streams finish
+	draining atomic.Bool
+
+	limitMu sync.Mutex
+	limits  map[byte]*keyLimit // per secret key; nil entries mean "no limit configured"
+
 	// counters for /stats
 	hsOK, hsFail atomic.Int64
+	throttled    atomic.Int64 // streams refused by max_new_streams_per_sec_per_key
+	lastThrottle atomic.Int64 // unix nanos of the last throttle log line
+}
+
+// keyLimit is the shared budget of one secret key.
+type keyLimit struct {
+	rx, tx  *netx.Bucket // bytes per second received from / sent to the key's sessions
+	streams *netx.Bucket // new streams per second (exit role)
 }
 
 func New(cfg *config.ServerFile, logger *slog.Logger) (*Server, error) {
@@ -79,7 +93,10 @@ func New(cfg *config.ServerFile, logger *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 	idle, _ := time.ParseDuration(cfg.Server.IdleTimeout)
+	drain, _ := time.ParseDuration(cfg.Server.DrainTimeout)
 	s := &Server{
+		drain:   drain,
+		limits:  map[byte]*keyLimit{},
 		cfg:     cfg,
 		log:     logger,
 		started: time.Now(),
@@ -208,7 +225,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	run := func(f func()) { wg.Add(1); go func() { defer wg.Done(); f() }() }
 
 	run(func() {
-		if err := srv.Serve(s.mainLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(s.mainLn); err != nil && !errors.Is(err, http.ErrServerClosed) && !s.draining.Load() {
 			s.log.Error("tunnel listener stopped", "err", err)
 		}
 	})
@@ -226,10 +243,81 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	s.log.Info("server ready", "role", s.cfg.Server.Role, "tunnel", s.mainLn.Addr().String(), "carriers", s.cfg.Server.Carriers)
 	<-ctx.Done()
-	_ = srv.Close()
-	_ = s.mainLn.Close()
+	s.shutdown(srv)
 	wg.Wait()
 	return nil
+}
+
+// shutdown stops accepting new sessions and streams, lets the streams in flight
+// finish for up to drain_timeout, then closes everything. The forward ports of
+// an entry-role server close as soon as ctx is cancelled (entry.Serve).
+func (s *Server) shutdown(srv *http.Server) {
+	s.draining.Store(true)
+	_ = s.mainLn.Close() // no new sessions or visitors; established carrier connections stay up
+	if s.exit != nil {
+		s.exit.Drain()
+	}
+	if n := s.active(); n > 0 && s.drain > 0 {
+		s.log.Info("draining: waiting for streams to finish", "streams", n, "timeout", s.drain.String())
+		if netx.WaitDrained(s.drain, s.active) {
+			s.log.Info("drained")
+		} else {
+			s.log.Warn("drain timeout: closing with streams still open", "streams", s.active())
+		}
+	}
+	_ = srv.Close()
+	s.hub.CloseAll()
+}
+
+// active is the number of streams in flight: open on a session, or being served by the exit.
+func (s *Server) active() int {
+	n := s.hub.ActiveStreams()
+	if s.exit != nil && s.exit.Active() > n {
+		n = s.exit.Active()
+	}
+	return n
+}
+
+// limitsFor returns the shared budget of a key, or nil when no per-key limit is configured.
+func (s *Server) limitsFor(id byte) *keyLimit {
+	sec := &s.cfg.Server
+	if sec.MaxMbitPerKey <= 0 && sec.MaxNewStreamsPerSecPerKey <= 0 {
+		return nil
+	}
+	s.limitMu.Lock()
+	defer s.limitMu.Unlock()
+	if kl, ok := s.limits[id]; ok {
+		return kl
+	}
+	kl := &keyLimit{}
+	if sec.MaxMbitPerKey > 0 {
+		bps := sec.MaxMbitPerKey * 1e6 / 8
+		burst := max(bps/4, 64<<10) // a quarter second, at least one big write
+		kl.rx, kl.tx = netx.NewBucket(bps, burst), netx.NewBucket(bps, burst)
+	}
+	if n := sec.MaxNewStreamsPerSecPerKey; n > 0 {
+		kl.streams = netx.NewBucket(float64(n), float64(max(2*n, 10)))
+	}
+	s.limits[id] = kl
+	return kl
+}
+
+// streamGate is the per-key limit on new streams, or nil.
+func (s *Server) streamGate(kl *keyLimit, name string) func() bool {
+	if kl == nil || kl.streams == nil {
+		return nil
+	}
+	return func() bool {
+		if kl.streams.Allow() {
+			return true
+		}
+		s.throttled.Add(1)
+		now := time.Now().UnixNano()
+		if last := s.lastThrottle.Load(); now-last > int64(30*time.Second) && s.lastThrottle.CompareAndSwap(last, now) {
+			s.log.Warn("stream rate limit reached: refusing new streams", "name", name, "limit_per_sec", s.cfg.Server.MaxNewStreamsPerSecPerKey)
+		}
+		return false
+	}
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
@@ -300,6 +388,10 @@ func (s *Server) onHTTPSession(c net.Conn, res *proto.ServerResult, ip string) {
 // runSession owns an authenticated carrier conn until the mux session ends.
 func (s *Server) runSession(c net.Conn, res *proto.ServerResult, ip string) {
 	defer c.Close()
+	kl := s.limitsFor(res.KeyID)
+	if kl != nil {
+		c = netx.Throttle(c, kl.rx, kl.tx)
+	}
 	sealed, err := seal.Wrap(c, res.SessionKey, false)
 	if err != nil {
 		s.log.Error("seal setup failed", "err", err)
@@ -323,7 +415,7 @@ func (s *Server) runSession(c net.Conn, res *proto.ServerResult, ip string) {
 	s.hsOK.Add(1)
 	s.log.Info("session up", "name", res.Name, "ip", ip, "role", s.cfg.Server.Role, "sessions", s.hub.Count())
 	if s.exit != nil {
-		go func() { _ = s.exit.Serve(s.ctx, ms) }()
+		go func() { _ = s.exit.ServeLimited(s.ctx, ms, s.streamGate(kl, res.Name)) }()
 	} else {
 		go refuseStreams(ms)
 	}
@@ -344,6 +436,9 @@ func refuseStreams(ms interface {
 		_ = st.Close()
 	}
 }
+
+// Throttled is the number of streams refused by max_new_streams_per_sec_per_key.
+func (s *Server) Throttled() int64 { return s.throttled.Load() }
 
 // Sessions returns the number of live tunnel sessions.
 func (s *Server) Sessions() int { return s.hub.Count() }

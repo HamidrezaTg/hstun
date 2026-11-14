@@ -18,6 +18,8 @@ if [ -z "$have" ] || [ "$(printf '%s\n%s\n' "$have" "$MIN_GO" | sort -V | head -
 fi
 go vet ./...
 go test -race -count=1 "$@" ./...
+# our patched copy of yamux is a module of its own, so ./... does not include it
+(cd third_party/yamux && go test -count=1 -short ./...)
 for f in FuzzReadMsg FuzzReadOpen FuzzParseHello; do
   # Go's fuzzer sometimes reports "context deadline exceeded" when its time limit lands while a worker is mid-run
   # on a busy machine (no crashing input is saved). A real finding fails again and leaves a file in testdata/fuzz.

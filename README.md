@@ -1,5 +1,7 @@
 # hstun
 
+[English](README.md) · [فارسی](README.fa.md)
+
 Carries TCP traffic through an ordinary HTTPS connection. Everything rides authenticated, end-to-end encrypted,
 multiplexed sessions, so a few TLS connections carry any number of TCP streams. It is plain transport engineering
 (real TLS, a real WebSocket upgrade or real POST requests, an authenticated handshake): it does not imitate other
@@ -14,7 +16,7 @@ protocols or try to beat DPI with tricks.
 - **Exit**: the host outside the restricted network. It receives the tunnel and passes the traffic to your proxy.
 - **Entry**: the host inside. Your users (or your proxy clients) connect to it.
 
-Version 0.4.0. Pre-release, not independently audited. Details: [docs/security.md](docs/security.md).
+Version 0.5.0. Pre-release, not independently audited. Details: [docs/security.md](docs/security.md).
 
 ## Quick start
 
@@ -40,7 +42,7 @@ WebSocket (`ws`) is the default carrier and is chosen for you; see below if you 
 | You already use a Cloudflare Tunnel | `cloudflared` | `chunk` if long connections to Cloudflare are cut on your path, else `ws` |
 | WebSocket is blocked on the path | any | `http` |
 
-More: [docs/modes-and-carriers.md](docs/modes-and-carriers.md). Change the carrier on the entry with `--carrier ws|http|chunk`, or use `--carrier auto` to let it fail over by itself.
+More: [docs/modes-and-carriers.md](docs/modes-and-carriers.md). Each carrier works on its own: change it on the entry with `--carrier ws|http|chunk`, or use `--carrier auto` to let the entry fail over between them by itself (in the menu: *Settings*; or `hstun-ctl edit --carrier http`).
 
 ## Daily use
 
@@ -60,6 +62,8 @@ Everything has flags too, so it runs unattended (`--yes`): [docs/install.md](doc
 whether to keep, change or reinstall: the certificate, secret and paths survive a change, so paired entries keep working. Services you set up by hand
 can be taken over with `hstun-ctl adopt` ([docs/operations.md](docs/operations.md)).
 
+A restart is graceful: user ports close first and connections in flight get `drain_timeout` (10 s by default) to finish. A transfer that is cut (a reset on one side, or the tunnel dying) reaches the other side as a reset, not as a complete one. On the exit, `--max-mbit` and `--max-new-streams` cap what one secret key can use. See [docs/operations.md](docs/operations.md).
+
 ## Requirements
 
 Linux with systemd (Debian/Ubuntu tested; dnf, yum and pacman are handled), x86-64 or arm64, root. `curl`, `tar`, `openssl` and `jq` are installed if missing.
@@ -75,6 +79,7 @@ a per-source connection cap; with another firewall (or a cloud firewall) you ope
 - After a mutual HMAC handshake every byte is sealed with AES-256-GCM under keys only the two hstun ends hold; a CDN or proxy in between sees HTTP framing, not your data.
 - The secret is a 0600 file, never printed, and the pair code is the only place it travels: treat the pair code like a password.
 - The server answers anything that is not the two secret paths with an ordinary website (decoy). Connections, handshakes and auth failures are rate-limited per address.
+- Found a vulnerability? Report it privately, see [SECURITY.md](SECURITY.md).
 - hstun does not hide that you use HTTPS to a server, and does not copy a browser's TLS fingerprint (Go's TLS is used as is). Read [docs/security.md](docs/security.md) for what an observer can still tell.
 
 ## More documentation

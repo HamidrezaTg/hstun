@@ -20,7 +20,7 @@ import (
 	"hstun/internal/server"
 )
 
-var version = "0.4.0"
+var version = "0.5.0"
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
@@ -119,6 +119,15 @@ func check(args []string) {
 	}
 }
 
+// stopContext is cancelled by the first SIGINT or SIGTERM, which starts a
+// graceful stop (streams in flight get drain_timeout to finish). It then gives
+// the signals back to the runtime, so a second one ends the process at once.
+func stopContext() context.Context {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() { <-ctx.Done(); stop() }()
+	return ctx
+}
+
 func runServer(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	path := fs.String("config", "", "server config file")
@@ -138,8 +147,7 @@ func runServer(args []string) {
 	if err := s.Listen(); err != nil {
 		fatal(err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx := stopContext()
 	if err := s.Serve(ctx); err != nil {
 		fatal(err)
 	}
@@ -163,7 +171,5 @@ func runClient(args []string) {
 	if err := c.Listen(); err != nil {
 		fatal(err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	c.Run(ctx)
+	c.Run(stopContext())
 }

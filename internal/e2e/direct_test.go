@@ -30,6 +30,7 @@ type direct struct {
 	fwd      string
 	socks    string
 	log      *slog.Logger
+	stop     func() // cancels the server and waits for Serve to return (idempotent)
 }
 
 func startDirectServer(t *testing.T, carriers []string, denyPrivate bool) *direct {
@@ -38,6 +39,12 @@ func startDirectServer(t *testing.T, carriers []string, denyPrivate bool) *direc
 }
 
 func startDirectServerCap(t *testing.T, carriers []string, denyPrivate bool, maxStreams int) *direct {
+	t.Helper()
+	return startDirectServerMut(t, carriers, denyPrivate, maxStreams, nil)
+}
+
+// startDirectServerMut is startDirectServerCap with a hook to change the server config.
+func startDirectServerMut(t *testing.T, carriers []string, denyPrivate bool, maxStreams int, mut func(*config.ServerFile)) *direct {
 	t.Helper()
 	d := &direct{log: quiet()}
 	d.echo = testutil.Echo(t)
@@ -58,6 +65,9 @@ func startDirectServerCap(t *testing.T, carriers []string, denyPrivate bool, max
 		Forward:   []config.Forward{{Name: "x1", Target: d.echo}},
 		SocksExit: config.SocksExit{Enabled: true, DenyPrivate: denyPrivate},
 	}
+	if mut != nil {
+		mut(cfg)
+	}
 	srv, err := server.New(cfg, d.log)
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +79,8 @@ func startDirectServerCap(t *testing.T, carriers []string, denyPrivate bool, max
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); _ = srv.Serve(ctx) }()
-	t.Cleanup(func() { cancel(); wg.Wait() })
+	d.stop = func() { cancel(); wg.Wait() }
+	t.Cleanup(d.stop)
 	d.srv, d.tunnel = srv, srv.Addr().String()
 	return d
 }

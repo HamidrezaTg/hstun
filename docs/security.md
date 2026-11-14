@@ -88,13 +88,15 @@ sits on the path including a TLS-terminating CDN, without the shared secret.
 - Wedge test: 500 half-dead connections held; a legitimate client keeps p99 < 1 s
   and goroutines return to baseline.
 - Idle tunnels stay idle.
+- Per-key limits on bandwidth and on the rate of new streams (`max_mbit_per_key`, `max_new_streams_per_sec_per_key`)
+  bound what one key can take from an exit, and a stopping process drains instead of cutting every stream.
 
 
 ## Known limits
 
-- A reset or timeout on one side of a stream reaches the other side as a clean EOF
-  (yamux has no public reset), so a truncated transfer is not signalled by hstun; rely on
-  the carried protocol (TLS, VLESS with its own framing) to detect that.
+- A cut transfer is passed on as a cut: if one side resets (RST), vanishes or the tunnel session dies, the other
+  side gets a connection reset and not a clean end. This needs a two-hunk patch to yamux that adds `Stream.Reset`
+  (see `third_party/yamux/PATCHES.md`). One case is still not signalled: an idle timeout ends the stream with a normal close.
 - Cloudflare peers are exempt from `max_conns_per_ip`; the global `max_conns` still applies.
 - See "Looking like ordinary HTTPS" for what traffic analysis can still tell.
 

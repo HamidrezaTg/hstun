@@ -112,6 +112,30 @@ func (h *Hub) Snapshot() []SessionInfo {
 	return out
 }
 
+// ActiveStreams is the number of streams open on all live sessions.
+func (h *Hub) ActiveStreams() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, s := range h.sessions {
+		n += s.Mux.NumStreams()
+	}
+	return n
+}
+
+// CloseAll closes every live session (the streams on them end as resets).
+func (h *Hub) CloseAll() {
+	h.mu.Lock()
+	all := make([]*Session, 0, len(h.sessions))
+	for _, s := range h.sessions {
+		all = append(all, s)
+	}
+	h.mu.Unlock()
+	for _, s := range all {
+		_ = s.Mux.Close()
+	}
+}
+
 // candidates returns live sessions under the stream cap, least loaded first.
 func (h *Hub) candidates() []*Session {
 	h.mu.Lock()

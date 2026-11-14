@@ -320,3 +320,33 @@ func TestAutoCarrierConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestKeyLimitsAndDrainConfig(t *testing.T) {
+	srv := "[server]\nlisten=\"0.0.0.0:1\"\ntls_cert=\"a\"\ntls_key=\"b\"\nsecret_files=[\"s\"]\n"
+	f, err := LoadServer(write(t, srv+"max_mbit_per_key=12.5\nmax_new_streams_per_sec_per_key=40\ndrain_timeout=\"30s\"\n"))
+	if err != nil || f.Server.MaxMbitPerKey != 12.5 || f.Server.MaxNewStreamsPerSecPerKey != 40 || f.Server.DrainTimeout != "30s" {
+		t.Fatalf("valid limits: %v %+v", err, f)
+	}
+	if f, err := LoadServer(write(t, srv)); err != nil || f.Server.MaxMbitPerKey != 0 || f.Server.DrainTimeout != "10s" {
+		t.Fatalf("defaults: limits off, drain 10s: %v %+v", err, f)
+	}
+	for name, body := range map[string]string{
+		"negative mbit":      "max_mbit_per_key=-1\n",
+		"absurd mbit":        "max_mbit_per_key=1e9\n",
+		"negative streams":   "max_new_streams_per_sec_per_key=-5\n",
+		"drain not duration": "drain_timeout=\"soon\"\n",
+		"drain negative":     "drain_timeout=\"-5s\"\n",
+		"drain too long":     "drain_timeout=\"1h\"\n",
+	} {
+		if _, err := LoadServer(write(t, srv+body)); err == nil {
+			t.Errorf("server: %s accepted", name)
+		}
+	}
+	cli := "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\n"
+	if f, err := LoadClient(write(t, cli+"drain_timeout=\"0s\"\n")); err != nil || f.Client.DrainTimeout != "0s" {
+		t.Fatalf("client drain 0s: %v", err)
+	}
+	if _, err := LoadClient(write(t, cli+"drain_timeout=\"forever\"\n")); err == nil {
+		t.Error("client: drain_timeout forever accepted")
+	}
+}

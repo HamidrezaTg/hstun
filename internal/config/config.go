@@ -63,6 +63,13 @@ type ServerSection struct {
 	AuthFailPerMinPerIP  int    `toml:"auth_fail_per_min_per_ip"`
 	IdleTimeout          string `toml:"idle_timeout"`
 	AdminListen          string `toml:"admin_listen"`
+
+	// Per secret key (every session of one key shares the budget); 0 = off.
+	MaxMbitPerKey             float64 `toml:"max_mbit_per_key"`                // megabits per second, each direction
+	MaxNewStreamsPerSecPerKey int     `toml:"max_new_streams_per_sec_per_key"` // exit role: new streams the key may open per second
+	// DrainTimeout is how long a stopping process lets the streams in flight
+	// finish (no new sessions or streams are accepted meanwhile); "0s" = stop at once.
+	DrainTimeout string `toml:"drain_timeout"`
 }
 
 type Forward struct {
@@ -121,6 +128,10 @@ type ClientSection struct {
 	MaxStreamsPerSession int    `toml:"max_streams_per_session"`
 	ForwardMaxConnsPerIP int    `toml:"forward_max_conns_per_ip"` // 0 = off
 	AdminListen          string `toml:"admin_listen"`
+
+	// DrainTimeout is how long a stopping process lets the streams in flight
+	// finish (no new connections or streams meanwhile); "0s" = stop at once.
+	DrainTimeout string `toml:"drain_timeout"`
 }
 
 type SocksExit struct {
@@ -158,6 +169,7 @@ func LoadServer(path string) (*ServerFile, error) {
 	f.Server.ForwardMaxConnsPerIP = 256
 	f.Server.AuthFailPerMinPerIP = 10
 	f.Server.IdleTimeout = "10m"
+	f.Server.DrainTimeout = "10s"
 	if err := decode(path, f); err != nil {
 		return nil, err
 	}
@@ -225,6 +237,12 @@ func (f *ServerFile) validate() error {
 	}
 	if s.MaxConnsPerIP < 0 || s.MaxSessionsPerKey < 0 || s.AuthFailPerMinPerIP < 0 || s.ForwardMaxConnsPerIP < 0 {
 		return errors.New("server: max_conns_per_ip, max_sessions_per_key, auth_fail_per_min_per_ip and forward_max_conns_per_ip must be >= 0 (0 = off)")
+	}
+	if s.MaxMbitPerKey < 0 || s.MaxMbitPerKey > 100000 || s.MaxNewStreamsPerSecPerKey < 0 {
+		return errors.New("server: max_mbit_per_key (0..100000) and max_new_streams_per_sec_per_key must be >= 0 (0 = off)")
+	}
+	if err := checkDrain("server", s.DrainTimeout); err != nil {
+		return err
 	}
 	for _, c := range s.AllowFrom {
 		if _, _, err := net.ParseCIDR(c); err != nil {
@@ -303,6 +321,7 @@ func LoadClient(path string) (*ClientFile, error) {
 	f.Client.TLSVerify = "system"
 	f.Client.Ping = "25s"
 	f.Client.IdleTimeout = "10m"
+	f.Client.DrainTimeout = "10s"
 	f.SocksExit.DenyPrivate = true
 	if err := decode(path, f); err != nil {
 		return nil, err
@@ -387,6 +406,9 @@ func (f *ClientFile) validate() error {
 	if c.ForwardMaxConnsPerIP < 0 {
 		return errors.New("client: forward_max_conns_per_ip must be >= 0 (0 = off)")
 	}
+	if err := checkDrain("client", c.DrainTimeout); err != nil {
+		return err
+	}
 	if c.MaxStreamsPerSession < 1 {
 		return errors.New("client: max_streams_per_session must be >= 1")
 	}
@@ -395,6 +417,18 @@ func (f *ClientFile) validate() error {
 	}
 	if err := validateRole(c.Role, f.Forward, f.Socks, f.SocksExit); err != nil {
 		return fmt.Errorf("client: %w", err)
+	}
+	return nil
+}
+
+// checkDrain validates drain_timeout: empty or a duration from 0s to 5m.
+func checkDrain(who, v string) error {
+	if v == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 || d > 5*time.Minute {
+		return fmt.Errorf("%s: drain_timeout must be a duration from 0s to 5m, got %q", who, v)
 	}
 	return nil
 }

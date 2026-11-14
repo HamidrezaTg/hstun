@@ -27,6 +27,22 @@ paired entries keep working), or reinstall from scratch (new certificate and sec
 
 Several instances can live on one host (`--name NAME` on every command, or pick from the menu).
 
+## Stopping and restarting
+
+`systemctl stop|restart`, `hstun-ctl restart`, `update` and `edit` send SIGTERM, which starts a **graceful stop**:
+
+1. The user ports close (entry) or the tunnel port stops accepting (exit), so nothing new starts; the exit also refuses new streams.
+2. Streams already running get up to `drain_timeout` (default `10s`) to finish. A request that is in flight completes; a stream that is still open when the time is up is cut and its two ends see a connection reset.
+3. A second SIGTERM or Ctrl+C stops at once.
+
+Long-lived connections (a VLESS session that runs for hours) do not finish in 10 s, so a restart costs at most that much extra and then cuts them, exactly as before. Raise it (`--drain-timeout 60s`, or `drain_timeout` in the config) if your traffic is mostly short transfers and you want them never cut; `0s` restores the old stop-at-once behaviour. The systemd unit allows 90 s, so keep it below that.
+
+While draining, `/stats` shows `"draining": true`, and the log says how many streams it is waiting for.
+
+## Limits per key
+
+`--max-mbit N` and `--max-new-streams N` on the exit (installer flags, also `hstun-ctl edit`) cap one secret key's bandwidth and stream rate, see [config reference](config-reference.md). They protect the exit when an entry misbehaves or its secret leaks; they are not traffic shaping for fairness between your own users, who all share the entry's key.
+
 ## Rotating the secret
 
 The exit accepts several secrets at once, so nothing has to be interrupted:
@@ -39,7 +55,7 @@ Run `hstun-ctl rotate-secret` again at any time during step 2 to print the same 
 
 ## Keeping hosts on one release
 
-`hstun-ctl pin 0.4.0` stores the version; `hstun-ctl update` then installs exactly that release (and the menu stops announcing newer ones). `pin --clear` goes back to following the latest. The exit prints the entry's command with the installer URL of its own release (`.../vX.Y.Z/install.sh`), so both hosts start on the same version.
+`hstun-ctl pin 0.5.0` stores the version; `hstun-ctl update` then installs exactly that release (and the menu stops announcing newer ones). `pin --clear` goes back to following the latest. The exit prints the entry's command with the installer URL of its own release (`.../vX.Y.Z/install.sh`), so both hosts start on the same version.
 
 ## Adopting a hand-installed setup
 

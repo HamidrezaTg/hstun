@@ -38,7 +38,7 @@ scripts/build.sh           # static build and sha256
 `install.sh` is installed on hosts as `hstun-ctl`. Keep `INSTALLER_VERSION` equal to `var version` in `cmd/hstun/main.go`.
 After changing it run `shellcheck -S warning install.sh scripts/*.sh`, then `scripts/package.sh && scripts/test-install.sh && scripts/test-adopt.sh && scripts/test-ctl.sh`.
 Release: bump the version, `scripts/package.sh`, then `gh release create vX.Y.Z dist/hstun_*.tar.gz dist/SHA256SUMS --repo OWNER/hstun`; the installer downloads and verifies it.
-Go dependencies are vendored (`go mod vendor` after changing `go.mod`); update `THIRD_PARTY_NOTICES.md` and the licenses copied in `scripts/package.sh` when they change.
+Go dependencies are vendored (`go mod vendor` after changing `go.mod`). yamux is carried in `third_party/yamux` with two small patches (see its `PATCHES.md`) and replaced in `go.mod`; run `go mod vendor` after touching it and its own tests with `cd third_party/yamux && go test -short ./...`; update `THIRD_PARTY_NOTICES.md` and the licenses copied in `scripts/package.sh` when they change.
 
 ## Guardrails
 

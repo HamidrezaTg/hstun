@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,6 +29,9 @@ type Exit struct {
 	idle    time.Duration
 	dialer  net.Dialer
 	lookup  func(ctx context.Context, host string) ([]net.IP, error)
+
+	active   atomic.Int64 // streams being served
+	draining atomic.Bool  // refuse new streams (shutdown in progress)
 }
 
 // New builds the exit. maxStreams caps concurrent streams per session (0 = no
@@ -228,8 +232,21 @@ func allZero(b []byte) bool {
 	return true
 }
 
+// Active is the number of streams being served right now.
+func (x *Exit) Active() int { return int(x.active.Load()) }
+
+// Drain makes the exit refuse new streams; the ones being served carry on.
+func (x *Exit) Drain() { x.draining.Store(true) }
+
 // Serve accepts streams on the session until it ends.
 func (x *Exit) Serve(ctx context.Context, ms *yamux.Session) error {
+	return x.ServeLimited(ctx, ms, nil)
+}
+
+// ServeLimited is Serve with a gate: when allow is not nil, a new stream is
+// refused (reset) unless allow returns true. The server uses it for the
+// per-key rate of new streams.
+func (x *Exit) ServeLimited(ctx context.Context, ms *yamux.Session, allow func() bool) error {
 	var sem chan struct{}
 	if x.maxStr > 0 {
 		sem = make(chan struct{}, x.maxStr)
@@ -239,15 +256,21 @@ func (x *Exit) Serve(ctx context.Context, ms *yamux.Session) error {
 		if err != nil {
 			return err
 		}
+		if x.draining.Load() || (allow != nil && !allow()) {
+			_ = st.Reset()
+			continue
+		}
 		if sem != nil {
 			select {
 			case sem <- struct{}{}:
 			default: // over the cap: refuse instead of queueing
-				_ = st.Close()
+				_ = st.Reset()
 				continue
 			}
 		}
+		x.active.Add(1)
 		go func() {
+			defer x.active.Add(-1)
 			if sem != nil {
 				defer func() { <-sem }()
 			}

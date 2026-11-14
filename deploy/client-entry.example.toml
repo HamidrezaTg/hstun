@@ -16,6 +16,7 @@ spki_sha256 = ""                         # sha256 of the exit's public key (hex)
 tls_mlkem   = false
 ping        = "25s"
 idle_timeout = "10m"
+# drain_timeout = "10s"                    # how long a stopping client lets streams in flight finish (0s = at once)
 max_streams_per_session = 256
 forward_max_conns_per_ip = 256           # per-source cap on forward/SOCKS ports (0 = off)
 admin_listen = "127.0.0.1:9110"          # /stats, loopback only

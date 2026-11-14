@@ -19,6 +19,7 @@ spki_sha256 = ""                         # for spki: sha256 of the server's publ
 tls_mlkem   = false                      # keep false: the big ClientHello broke one real path
 ping        = "25s"
 idle_timeout = "10m"
+# drain_timeout = "10s"                    # how long a stopping client lets streams in flight finish (0s = at once)
 
 [[forward]]
 name   = "x1"

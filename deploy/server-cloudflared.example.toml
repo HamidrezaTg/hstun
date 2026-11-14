@@ -19,6 +19,9 @@ max_sessions_per_key    = 16
 max_streams_per_session = 256
 auth_fail_per_min_per_ip = 10             # counted per real client IP
 idle_timeout    = "10m"
+# max_mbit_per_key = 100                   # optional: megabits/s each direction, shared by one key's sessions (0 = off)
+# max_new_streams_per_sec_per_key = 200    # optional, exit role: new streams per second per key (0 = off)
+# drain_timeout = "10s"                    # how long a stopping process lets streams in flight finish (0s = at once)
 admin_listen    = "127.0.0.1:9112"
 
 [[forward]]

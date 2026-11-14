@@ -96,6 +96,16 @@ grep -q 'listen       = "0.0.0.0:' "$T/etc/hstun-v4/server.toml" || fail "--no-i
 ./install.sh uninstall --yes --purge --name v6 >/dev/null 2>&1; ./install.sh uninstall --yes --purge --name v4 >/dev/null 2>&1
 ok "--ipv6 listens on [::], --no-ipv6 on 0.0.0.0"
 
+# --- per-key limits, drain timeout, carrier auto ---
+./install.sh exit --yes --name lim --mode direct --max-mbit 20 --max-new-streams 50 --drain-timeout 5s --forward-target "127.0.0.1:$((base + 1))" --port "$((base + 54))" --backend-port "$((base + 55))" >"$T/lim.log" 2>&1 || { cat "$T/lim.log"; fail "exit with limits"; }
+grep -q '^max_mbit_per_key = 20$' "$T/etc/hstun-lim/server.toml" && grep -q '^max_new_streams_per_sec_per_key = 50$' "$T/etc/hstun-lim/server.toml" && grep -q '^drain_timeout = "5s"$' "$T/etc/hstun-lim/server.toml" || fail "limits are not in server.toml"
+if ./install.sh exit --yes --name lim2 --mode direct --max-mbit fast --forward-target "127.0.0.1:$((base + 1))" --port "$((base + 56))" >/dev/null 2>&1; then fail "--max-mbit accepted a word"; fi
+if ./install.sh exit --yes --name lim2 --mode direct --drain-timeout soon --forward-target "127.0.0.1:$((base + 1))" --port "$((base + 56))" >/dev/null 2>&1; then fail "--drain-timeout accepted a word"; fi
+./install.sh entry --yes --name au --join "$J" --carrier auto --drain-timeout 3s --forward-listen "127.0.0.1:$((base + 57))" >"$T/au.log" 2>&1 || { cat "$T/au.log"; fail "entry with --carrier auto"; }
+grep -q '^carrier     = "auto"$' "$T/etc/hstun-au/client.toml" && grep -q '^drain_timeout = "3s"$' "$T/etc/hstun-au/client.toml" || fail "carrier auto / drain are not in client.toml"
+./install.sh uninstall --yes --purge --name lim >/dev/null 2>&1; ./install.sh uninstall --yes --purge --name au >/dev/null 2>&1; rm -rf "${T:?}/etc/hstun-lim2"
+ok "--max-mbit, --max-new-streams, --drain-timeout and --carrier auto are written, bad values are refused"
+
 # --- the printed entry command names this exact release ---
 grep -q "raw.githubusercontent.com/.*/v$(sed -n 's/^INSTALLER_VERSION="\(.*\)"/\1/p' install.sh)/install.sh" "$T/exit.log" || fail "exit summary does not give the versioned installer URL"
 ok "the exit prints the installer URL of its own release"

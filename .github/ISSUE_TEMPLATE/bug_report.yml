@@ -1,0 +1,55 @@
+name: Bug report
+description: Something does not work, or works differently from the documentation
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run `hstun-ctl doctor` on the affected host first and read [troubleshooting](https://github.com/HamidrezaTg/hstun/blob/main/docs/troubleshooting.md).
+        **Never paste a pair code, a secret, a private key or a full config with real paths and secrets.** Replace IP addresses and domains you want to keep private with `EXAMPLE`.
+        A vulnerability goes to a private report (see SECURITY.md), not here.
+  - type: input
+    id: version
+    attributes:
+      label: hstun version
+      description: "Output of `hstun version` on each host (they should match)"
+      placeholder: "hstun 0.5.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Which host has the problem?
+      options: [Exit (outside host), Entry (restricted host), Both / not sure, The installer itself]
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: Mode and carrier
+      description: "For example: exit mode nginx, carrier ws. `hstun-ctl status` shows it."
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04, amd64"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: "Steps that reproduce it, if you know them."
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`hstun-ctl doctor` output"
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: "`hstun-ctl logs` (or `journalctl -u hstun-client -n 100`), with private addresses replaced."
+      render: text
