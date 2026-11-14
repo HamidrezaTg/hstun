@@ -350,3 +350,20 @@ func TestKeyLimitsAndDrainConfig(t *testing.T) {
 		t.Error("client: drain_timeout forever accepted")
 	}
 }
+
+func TestTLSFingerprintConfig(t *testing.T) {
+	cli := "[client]\nserver=\"h.example:443\"\nsecret_file=\"s\"\n"
+	if f, err := LoadClient(write(t, cli)); err != nil || f.Client.TLSFingerprint != "chrome" {
+		t.Fatalf("default must be chrome: %v %+v", err, f)
+	}
+	for _, v := range []string{"chrome", "chrome_nopq", "firefox", "safari", "ios", "android", "go"} {
+		if _, err := LoadClient(write(t, cli+"tls_fingerprint=\""+v+"\"\n")); err != nil {
+			t.Errorf("%s rejected: %v", v, err)
+		}
+	}
+	for _, v := range []string{"netscape", "Chrome ", "random"} {
+		if _, err := LoadClient(write(t, cli+"tls_fingerprint=\""+v+"\"\n")); err == nil {
+			t.Errorf("%q accepted", v)
+		}
+	}
+}

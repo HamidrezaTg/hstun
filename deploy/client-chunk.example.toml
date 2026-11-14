@@ -19,6 +19,7 @@ chunk_parallel   = 8                     # uploads and downloads in flight each 
 secret_file = "/etc/hstun/secret"
 name        = "client"
 tls_verify  = "system"
+tls_fingerprint = "chrome"             # ClientHello: chrome | chrome_nopq | firefox | safari | ios | android | go
 ping        = "25s"
 idle_timeout = "10m"
 # drain_timeout = "10s"                    # how long a stopping client lets streams in flight finish (0s = at once)

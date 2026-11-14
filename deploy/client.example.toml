@@ -17,6 +17,7 @@ tls_verify  = "system"                   # system | ca_file | spki (never off)
 ca_file     = ""                         # for ca_file: the CA that signed the server cert
 spki_sha256 = ""                         # for spki: sha256 of the server's public key (hex)
 tls_mlkem   = false                      # keep false: the big ClientHello broke one real path
+tls_fingerprint = "chrome"             # ClientHello: chrome | chrome_nopq | firefox | safari | ios | android | go
 ping        = "25s"
 idle_timeout = "10m"
 # drain_timeout = "10s"                    # how long a stopping client lets streams in flight finish (0s = at once)

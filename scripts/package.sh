@@ -27,6 +27,11 @@ for arch in amd64 arm64; do
   cp vendor/github.com/BurntSushi/toml/COPYING "$stage/share/licenses/BurntSushi-toml.COPYING"
   cp vendor/github.com/coder/websocket/LICENSE.txt "$stage/share/licenses/coder-websocket.LICENSE"
   cp vendor/github.com/hashicorp/yamux/LICENSE "$stage/share/licenses/hashicorp-yamux.LICENSE"
+  cp vendor/github.com/refraction-networking/utls/LICENSE "$stage/share/licenses/refraction-networking-utls.LICENSE"
+  cp vendor/github.com/andybalholm/brotli/LICENSE "$stage/share/licenses/andybalholm-brotli.LICENSE"
+  cp vendor/github.com/klauspost/compress/LICENSE "$stage/share/licenses/klauspost-compress.LICENSE"
+  cp vendor/golang.org/x/crypto/LICENSE "$stage/share/licenses/golang-x-crypto.LICENSE"
+  cp vendor/golang.org/x/sys/LICENSE "$stage/share/licenses/golang-x-sys.LICENSE"
   echo "$VERSION" > "$stage/VERSION"
   tar -C "$stage" --owner=0 --group=0 -czf "dist/hstun_${VERSION}_linux_${arch}.tar.gz" hstun share VERSION
   rm -rf "$stage"

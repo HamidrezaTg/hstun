@@ -85,8 +85,9 @@ func New(cfg *config.ClientFile, logger *slog.Logger) (*Client, error) {
 		opts: carrier.Options{
 			Server: cfg.Client.Server, Connect: cfg.Client.Connect, SNI: sni,
 			WSPath: cfg.Client.WSPath, HTTPPath: cfg.Client.HTTPPath, TLS: tc, UserAgent: cfg.Client.UserAgent,
-			ChunkUp:   cfg.Client.ChunkUpBytes,
-			ChunkDown: cfg.Client.ChunkDownBytes, ChunkPar: cfg.Client.ChunkParallel,
+			Fingerprint: cfg.Client.TLSFingerprint,
+			ChunkUp:     cfg.Client.ChunkUpBytes,
+			ChunkDown:   cfg.Client.ChunkDownBytes, ChunkPar: cfg.Client.ChunkParallel,
 		},
 	}
 	order := []string{cfg.Client.Carrier}

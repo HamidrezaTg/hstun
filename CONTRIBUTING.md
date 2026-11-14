@@ -42,7 +42,7 @@ Go dependencies are vendored (`go mod vendor` after changing `go.mod`). yamux is
 
 ## Guardrails
 
-Plain transport engineering: real TLS and ordinary HTTP/WebSocket framing. No protocol imitation, no browser TLS-fingerprint copying, no fake URL rotation or DPI tricks.
+hstun tries to be hard to detect and block: a browser-like TLS ClientHello (uTLS), a decoy website, and more as `docs/stealth-plan.md` lists. A new technique needs a test that shows it on the wire (a captured ClientHello, record sizes, timing) and an entry in the benchmark, so it earns its cost. Certificate verification is never turned off and the sealed stream is never bypassed. Do not copy code from AGPL projects such as BackPack or C-Tunnel.
 Making the server look like an ordinary website (decoy, ALPN, resumption) is in scope. Every new read, write or handshake needs a deadline and a length cap; new listeners are loopback by default.
 
 ## CI and releases

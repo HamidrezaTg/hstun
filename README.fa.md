@@ -4,7 +4,7 @@
 
 # hstun
 
-ترافیک TCP را از داخل یک اتصال HTTPS معمولی عبور می‌دهد. همهٔ بایت‌ها در نشست‌های چندکاناله، احراز هویت‌شده و رمزنگاری سرتاسری حمل می‌شوند؛ به این ترتیب چند اتصال TLS می‌تواند هر تعداد جریان TCP را جابه‌جا کند. این ابزار فقط مهندسی انتقال ساده است (TLS واقعی، ارتقای واقعی WebSocket یا درخواست‌های POST واقعی، و یک دست‌دهی احراز هویت‌شده). عمداً از پروتکل دیگری تقلید نمی‌کند و با ترفند سعی نمی‌کند DPI را دور بزند.
+ترافیک TCP را از داخل یک اتصال HTTPS معمولی عبور می‌دهد. همهٔ بایت‌ها در نشست‌های چندکاناله، احراز هویت‌شده و رمزنگاری سرتاسری حمل می‌شوند؛ به این ترتیب چند اتصال TLS می‌تواند هر تعداد جریان TCP را جابه‌جا کند. از TLS واقعی با ClientHello شبیه مرورگر (uTLS)، ارتقای واقعی WebSocket یا درخواست‌های POST واقعی، دست‌دهی احراز هویت‌شده و یک وب‌سایت طعمه استفاده می‌کند و طوری ساخته شده که شناسایی و مسدودسازی‌اش برای DPI سخت باشد. فهرست کارهای انجام‌شده و آنچه بعداً اندازه‌گیری می‌شود در [docs/stealth-plan.md](docs/stealth-plan.md) است.
 
 </div>
 
@@ -90,12 +90,12 @@ bash <(curl -Ls https://raw.githubusercontent.com/HamidrezaTg/hstun/main/install
 - پس از دست‌دهی متقابل HMAC، هر بایت با AES-256-GCM و کلیدهایی رمز می‌شود که فقط دو سر hstun دارند؛ CDN یا پروکسی میانی فقط قاب‌بندی HTTP را می‌بیند، نه داده را.
 - رمز یک فایل با دسترسی 0600 است و هرگز چاپ نمی‌شود. تنها جایی که رمز جابه‌جا می‌شود کد جفت‌سازی است: با آن مثل یک گذرواژه رفتار کنید.
 - سرور به هر چیزی که آن دو مسیر مخفی نباشد با یک وب‌سایت معمولی (طعمه) جواب می‌دهد. اتصال‌ها، دست‌دهی‌ها و شکست‌های احراز هویت برای هر آدرس محدود می‌شوند.
-- hstun پنهان نمی‌کند که شما از HTTPS به یک سرور استفاده می‌کنید و اثر انگشت TLS مرورگر را کپی نمی‌کند (TLS خود Go همان‌طور که هست به کار می‌رود). برای اینکه ناظر هنوز چه چیزهایی را می‌تواند بفهمد [docs/security.md](docs/security.md) را بخوانید.
+- کلاینت ClientHello یک مرورگر واقعی را می‌فرستد (`tls_fingerprint`؛ پیش‌فرض Chrome، و `go` آن را خاموش می‌کند)، پس اثر انگشت JA3/JA4 دیگر نمی‌گوید «یک برنامهٔ Go». hstun همچنان پنهان نمی‌کند که شما از HTTPS به یک سرور استفاده می‌کنید؛ برای اینکه ناظر هنوز چه چیزهایی را می‌تواند بفهمد [docs/security.md](docs/security.md) را بخوانید.
 - گزارش آسیب‌پذیری: [SECURITY.md](SECURITY.md) (گزارش خصوصی، نه Issue عمومی).
 
 ## مستندات بیشتر (انگلیسی)
 
-[docs/install.md](docs/install.md) (همهٔ پرچم‌ها، فایل‌های ساخته‌شده) · [docs/operations.md](docs/operations.md) (دستورها، adopt، آفلاین، انتشارها) · [docs/modes-and-carriers.md](docs/modes-and-carriers.md) · [docs/advanced-cloudflare.md](docs/advanced-cloudflare.md) · [docs/config-reference.md](docs/config-reference.md) · [docs/security.md](docs/security.md) · [docs/troubleshooting.md](docs/troubleshooting.md) · [CONTRIBUTING.md](CONTRIBUTING.md)
+[docs/install.md](docs/install.md) (همهٔ پرچم‌ها، فایل‌های ساخته‌شده) · [docs/operations.md](docs/operations.md) (دستورها، adopt، آفلاین، انتشارها) · [docs/modes-and-carriers.md](docs/modes-and-carriers.md) · [docs/advanced-cloudflare.md](docs/advanced-cloudflare.md) · [docs/config-reference.md](docs/config-reference.md) · [docs/security.md](docs/security.md) · [docs/stealth-plan.md](docs/stealth-plan.md) · [docs/troubleshooting.md](docs/troubleshooting.md) · [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## مجوز
 

@@ -3,10 +3,22 @@
 ## Looking like ordinary HTTPS
 
 Goal: to a passive observer and to an active prober, the server is a small HTTPS website, and the
-client is a TLS client that behaves like one. The line stays at plain TLS plus ordinary HTTP/1.1 and
-WebSocket: no imitation of another protocol, no browser TLS-fingerprint spoofing, no fake URL rotation.
+client is a TLS client that behaves like one. The carriers are ordinary HTTP/1.1 over TLS (WebSocket or
+POST requests). The client's ClientHello is a browser's (uTLS). More techniques are planned and
+benchmarked in [stealth-plan.md](stealth-plan.md).
 
 What is done (each has a test):
+
+- **Browser ClientHello (uTLS).** `tls_fingerprint` picks the profile: `chrome` (the default: Chrome 133 with the
+  X25519MLKEM768 key share), `chrome_nopq` (Chrome 120, a smaller hello), `firefox`, `safari`, `ios`, `android`, or `go`.
+  Every browser profile offers `http/1.1` as its only ALPN and leaves out ALPS, as a browser's WebSocket connection does,
+  because hstun speaks HTTP/1.1; it resumes sessions with a ticket. The User-Agent follows the profile. A test
+  captures the hello and checks GREASE, ALPN, extensions, the key shares and Chrome's JA4 cipher hash
+  (`8daaf6152771`). Verification (CA file or SPKI pin) works the same with every profile. Checked against four real public sites on 2026-11-14:
+  `chrome`, `chrome_nopq` and `firefox` completed a request on all of them; `safari` failed once with a signature error
+  (a uTLS quirk), and `ios` and `android` were not tried, so prefer chrome or firefox. The profiles are those
+  of the pinned uTLS snapshot, so they age: a browser profile that is years old is itself a tell, so update the
+  library with the releases.
 
 - **Decoy site.** Every request that is not a valid tunnel request gets what a small web server gives:
   `decoy_dir` (a static site, no directory listings, dot files hidden) or a built-in one-page site, and
@@ -29,9 +41,9 @@ certificate is visible to anyone who connects and does not hold the pin.
 
 What is **not** done, on purpose or for lack of a way to do it cleanly:
 
-- The ClientHello is Go's own, so a JA3/JA4 fingerprint identifies "a Go program", not a browser.
-  Matching a browser needs a TLS library that copies one (uTLS), which is imitation and a large
-  third-party dependency; it is outside this project's line.
+- With `tls_fingerprint = "go"` the ClientHello is Go's own, so a JA3/JA4 fingerprint identifies "a Go program".
+  The default is a browser profile instead (see below). Only the ClientHello is a browser's: after it the
+  handshake and the sealed stream are hstun's, and the server side is Go's `crypto/tls` (or nginx).
 - No padding or timing shaping. The mux keepalive is a small record every `ping` interval, and bulk
   transfers produce records of the sizes the carriers write. A sophisticated traffic classifier could
   still separate this from web browsing by volume and timing.

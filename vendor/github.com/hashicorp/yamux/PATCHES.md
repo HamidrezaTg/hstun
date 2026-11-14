@@ -12,3 +12,4 @@ To update yamux: copy the new release over this directory and re-apply the two h
 
 `session_test.go` has one adjusted assertion (`TestOpenStreamTimeout` accepts a reset stream as well as a closed one).
 The tests run on their own: `cd third_party/yamux && go test ./...`.
+The TLS connection type of the tests builds its certificate in memory (`testcert_test.go`) instead of loading `testdata/*.pem`, so no key file is committed.

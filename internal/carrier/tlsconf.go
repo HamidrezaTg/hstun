@@ -22,7 +22,9 @@ type Options struct {
 	WSPath   string
 	HTTPPath string
 	TLS      *tls.Config
-	// UserAgent is sent on every request; empty means DefaultUserAgent.
+	// Fingerprint is the ClientHello profile (see fingerprint.go); empty means DefaultFingerprint.
+	Fingerprint string
+	// UserAgent is sent on every request; empty means the one that matches Fingerprint (see UA).
 	UserAgent string
 
 	// Chunk selects the short-connection mode of the http carrier: every

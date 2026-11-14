@@ -209,7 +209,7 @@ NAME=""
 ROLE="" MODE="" FORWARD_TARGET="" PORT="" DOMAIN="" CERT="" KEY="" ACME="" EMAIL="" ALLOW_FROM="" DECOY_DIR="" BACKEND_PORT=""
 JOIN="" JOIN_SECRET="" NO_SECRET=0 SERVER="" CARRIER="" WS_PATH="" HTTP_PATH="" SECRET_FILE="" SECRET_FROM="" TLS_VERIFY="" SPKI="" CONNECT="" SNI=""
 FORWARD_LISTEN="" FORWARD_NAME="" CONNS="" CHUNK_PARALLEL="" SOCKS_LISTEN="" NO_FW="" ADMIN_PORT="" SELF_SIGNED="" PUBLIC_ADDR=""
-MAX_MBIT="" MAX_NEW_STREAMS="" DRAIN_TIMEOUT=""
+MAX_MBIT="" MAX_NEW_STREAMS="" DRAIN_TIMEOUT="" TLS_FINGERPRINT=""
 FOLLOW=0 PURGE=0 ALL=0 IPV6="" FINISH=0 SECRET_OVERRIDE="" EDIT_MODE=0 FILE="" FILE_TEST=0 FORCE=0 RECONFIGURE=0 REINSTALL=0 NEW_CERT=0 CUSTOMIZE=0 SKIP_LOAD="" DRY_RUN=0 ADOPT_ONLY=""
 ADOPTED="" ADOPT_UNITS="" ADOPT_BIN=""
 
@@ -220,7 +220,7 @@ set_paths() {
 }
 CONF_KEYS=(ROLE MODE FORWARD_TARGET PORT DOMAIN CERT KEY BACKEND_PORT ADMIN_PORT WS_PATH HTTP_PATH SERVER CARRIER TLS_VERIFY SPKI CONNECT SNI
   FORWARD_LISTEN FORWARD_NAME CONNS CHUNK_PARALLEL SOCKS_LISTEN ALLOW_FROM PUBLIC_ADDR FW_PORTS CONNLIMIT_PORT SELF_SIGNED
-  ADOPTED ADOPT_UNITS ADOPT_BIN IPV6 MAX_MBIT MAX_NEW_STREAMS DRAIN_TIMEOUT)
+  ADOPTED ADOPT_UNITS ADOPT_BIN IPV6 MAX_MBIT MAX_NEW_STREAMS DRAIN_TIMEOUT TLS_FINGERPRINT)
 FW_PORTS="" CONNLIMIT_PORT=""
 load_conf() { # saved values only fill what is still empty (flags win)
   [ -f "$ETC/install.conf" ] || return 0
@@ -562,6 +562,7 @@ check_limits() { # --max-mbit, --max-new-streams and --drain-timeout, whichever 
   case "$MAX_MBIT" in "") ;; *[!0-9.]* | . | *.*.*) die "--max-mbit must be a number (megabits per second, 0 = no limit)" ;; esac
   case "$MAX_NEW_STREAMS" in "") ;; *[!0-9]*) die "--max-new-streams must be a whole number (new streams per second, 0 = no limit)" ;; esac
   case "$DRAIN_TIMEOUT" in "" | [0-9]*s | [0-9]*m) ;; *) die "--drain-timeout must look like 10s or 1m (0s = stop at once)" ;; esac
+  case "$TLS_FINGERPRINT" in "" | go | chrome | chrome_nopq | firefox | safari | ios | android) ;; *) die "--tls-fingerprint must be chrome, chrome_nopq, firefox, safari, ios, android or go" ;; esac
 }
 render_server_toml() {
   local listen tls="" trust="" allow="" lim=""
@@ -618,8 +619,9 @@ allow_ports  = []
 EOF
 }
 render_client_toml() {
-  local verify="tls_verify  = \"system\"" conn="" sni="" socks="" ch="" drain="" conns=$CONNS
+  local verify="tls_verify  = \"system\"" conn="" sni="" socks="" ch="" drain="" fp="" conns=$CONNS
   check_limits
+  [ -n "$TLS_FINGERPRINT" ] && fp="tls_fingerprint = \"$TLS_FINGERPRINT\""
   [ -n "$DRAIN_TIMEOUT" ] && drain="drain_timeout = \"$DRAIN_TIMEOUT\""
   [ "$TLS_VERIFY" = spki ] && verify="tls_verify  = \"spki\"
 spki_sha256 = \"$SPKI\""
@@ -645,6 +647,7 @@ $ch
 secret_file = "$ETC/secret"
 name        = "$(hostname -s 2>/dev/null || echo entry)${NAME:+-$NAME}"
 $verify
+$fp
 ping        = "25s"
 idle_timeout = "10m"
 max_streams_per_session = 256
@@ -1720,6 +1723,7 @@ Exit:      --mode nginx|direct|cloudflared   --forward-target HOST:PORT   --port
            --cert FILE --key FILE | --acme [--email E]   --allow-from CIDR[,CIDR]   --decoy-dir DIR   --public-addr ADDR   --backend-port N
 Entry:     --join STRING   --server HOST:PORT   --carrier ws|http|chunk|auto   --ws-path P   --http-path P
            --secret-file FILE | --secret-from USER@HOST[:SSHPORT]   --tls-verify system|spki   --spki HEX
+           --tls-fingerprint chrome|chrome_nopq|firefox|safari|ios|android|go (ClientHello the entry sends; default chrome)
            --connect IP:PORT   --sni NAME   --forward-listen ADDR:PORT   --forward-name NAME   --conns N
            --chunk-parallel N   --socks ADDR:PORT
 Limits:    --max-mbit N (exit: megabits per second per key, each direction)   --max-new-streams N (exit: new streams per second per key)
@@ -1770,6 +1774,7 @@ while [ $# -gt 0 ]; do
     --conns) CONNS=$2; shift ;;
     --chunk-parallel) CHUNK_PARALLEL=$2; shift ;;
     --socks) SOCKS_LISTEN=$2; shift ;;
+    --tls-fingerprint) TLS_FINGERPRINT=$2; shift ;;
     --max-mbit) MAX_MBIT=$2; shift ;;
     --max-new-streams) MAX_NEW_STREAMS=$2; shift ;;
     --drain-timeout) DRAIN_TIMEOUT=$2; shift ;;

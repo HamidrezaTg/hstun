@@ -70,10 +70,10 @@ func Dial(ctx context.Context, o carrier.Options) (net.Conn, error) {
 				return nil, err
 			}
 			netx.Tune(raw)
-			conn := tls.Client(raw, cloneTLS(o.TLS))
 			hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
-			if err := conn.HandshakeContext(hctx); err != nil {
+			conn, err := o.Handshake(hctx, raw)
+			if err != nil {
 				_ = raw.Close()
 				return nil, err
 			}
@@ -84,7 +84,7 @@ func Dial(ctx context.Context, o carrier.Options) (net.Conn, error) {
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
 		DisableCompression:  true,
 	}
-	hc := &http.Client{Transport: carrier.WithUserAgent(tr, o.UserAgent)}
+	hc := &http.Client{Transport: carrier.WithUserAgent(tr, o.UA())}
 	c, _, err := websocket.Dial(ctx, "wss://"+o.Server+o.WSPath, &websocket.DialOptions{
 		HTTPClient:      hc,
 		CompressionMode: websocket.CompressionDisabled,
@@ -94,13 +94,6 @@ func Dial(ctx context.Context, o carrier.Options) (net.Conn, error) {
 		return nil, err
 	}
 	return wrap(c), nil
-}
-
-func cloneTLS(c *tls.Config) *tls.Config {
-	if c == nil {
-		return nil
-	}
-	return c.Clone()
 }
 
 // Handler upgrades requests on the websocket path and hands each connection

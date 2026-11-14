@@ -83,7 +83,7 @@ func TestDialLooksLikeOrdinaryHTTPSClient(t *testing.T) {
 		if s.proto[i] != "http/1.1" {
 			t.Errorf("conn %d: negotiated %q", i, s.proto[i])
 		}
-		if s.ua[i] != carrier.DefaultUserAgent {
+		if s.ua[i] != o.UA() {
 			t.Errorf("conn %d: User-Agent %q", i, s.ua[i])
 		}
 	}

@@ -3,9 +3,9 @@
 [English](README.md) · [فارسی](README.fa.md)
 
 Carries TCP traffic through an ordinary HTTPS connection. Everything rides authenticated, end-to-end encrypted,
-multiplexed sessions, so a few TLS connections carry any number of TCP streams. It is plain transport engineering
-(real TLS, a real WebSocket upgrade or real POST requests, an authenticated handshake): it does not imitate other
-protocols or try to beat DPI with tricks.
+multiplexed sessions, so a few TLS connections carry any number of TCP streams. It uses
+real TLS with a browser-like ClientHello (uTLS), a real WebSocket upgrade or real POST requests, an authenticated handshake and a decoy website. It is built to be hard for DPI to
+recognise and block, and the [stealth plan](docs/stealth-plan.md) lists what is done and what is measured next.
 
 ```
  your users ──▶  ENTRY host           ══ HTTPS (WebSocket or HTTP) ══▶   EXIT host          ──▶  your proxy
@@ -80,13 +80,13 @@ a per-source connection cap; with another firewall (or a cloud firewall) you ope
 - The secret is a 0600 file, never printed, and the pair code is the only place it travels: treat the pair code like a password.
 - The server answers anything that is not the two secret paths with an ordinary website (decoy). Connections, handshakes and auth failures are rate-limited per address.
 - Found a vulnerability? Report it privately, see [SECURITY.md](SECURITY.md).
-- hstun does not hide that you use HTTPS to a server, and does not copy a browser's TLS fingerprint (Go's TLS is used as is). Read [docs/security.md](docs/security.md) for what an observer can still tell.
+- The client sends the ClientHello of a real browser (`tls_fingerprint`, Chrome by default; `go` turns it off), so a JA3/JA4 fingerprint does not say "a Go program". hstun still does not hide that you use HTTPS to a server; read [docs/security.md](docs/security.md) for what an observer can still tell.
 
 ## More documentation
 
 [docs/install.md](docs/install.md) (every flag, files created) · [docs/operations.md](docs/operations.md) (commands, adopt, offline, releases) ·
 [docs/modes-and-carriers.md](docs/modes-and-carriers.md) · [docs/advanced-cloudflare.md](docs/advanced-cloudflare.md) (Cloudflare, cloudflared, chunk) ·
-[docs/config-reference.md](docs/config-reference.md) (manual setup, config keys) · [docs/security.md](docs/security.md) · [docs/troubleshooting.md](docs/troubleshooting.md) ·
+[docs/config-reference.md](docs/config-reference.md) (manual setup, config keys) · [docs/security.md](docs/security.md) · [docs/stealth-plan.md](docs/stealth-plan.md) (what is done against DPI and how it is benchmarked) · [docs/troubleshooting.md](docs/troubleshooting.md) ·
 [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## License

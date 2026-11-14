@@ -47,7 +47,7 @@ These are per *key*, so with several entries that each have their own secret (se
 Client (`deploy/client.example.toml`): `role`, `server`, optional `connect` (dial an IP
 while keeping the hostname for SNI/Host), `carrier` (`ws`, `http`, `chunk` or `auto`, which fails over ws → http → chunk; `auto_order` sets the list), `conns` (2 is enough; more connections did not measure faster), `dial_stagger`
 (spreads the first dials, default `2s`), `user_agent`, `tls_verify`
-(`system`, `ca_file` or `spki`; never off), `tls_mlkem` (default false; it worked to one host and broke the upgrade to another, so test each path before enabling), `drain_timeout`, `[[forward]]`
+(`system`, `ca_file` or `spki`; never off), `tls_fingerprint` (the ClientHello: `chrome` by default, `chrome_nopq`, `firefox`, `safari`, `ios`, `android` or `go`; see [security](security.md)), `tls_mlkem` (only for `tls_fingerprint = "go"`; default false; it worked to one host and broke the upgrade to another, so test each path before enabling; the `chrome` profile carries the post-quantum share like real Chrome, use `chrome_nopq` if a path cuts the large hello), `drain_timeout`, `[[forward]]`
 (`name` -> local `target`), `[socks_exit]` (`deny_private` refuses loopback,
 private, CGNAT, link-local and the host's own addresses).
 

@@ -14,6 +14,7 @@ name        = "entry-a"
 tls_verify  = "spki"                     # system | ca_file | spki (never off)
 spki_sha256 = ""                         # sha256 of the exit's public key (hex) for a self-signed cert
 tls_mlkem   = false
+tls_fingerprint = "chrome"             # ClientHello: chrome | chrome_nopq | firefox | safari | ios | android | go
 ping        = "25s"
 idle_timeout = "10m"
 # drain_timeout = "10s"                    # how long a stopping client lets streams in flight finish (0s = at once)

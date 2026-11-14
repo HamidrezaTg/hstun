@@ -87,6 +87,7 @@ Useful flags: `--carrier ws|http|chunk` (`chunk` for a path that cuts long conne
 | `--ws-path P`, `--http-path P` | exit | secret paths (random by default) |
 | `--join STRING` | entry | the pair code (or secret-less join string) printed by the exit |
 | `--server HOST:PORT`, `--carrier ws\|http\|chunk\|auto`, `--tls-verify system\|spki`, `--spki HEX` | entry | only needed without a pair code |
+| `--tls-fingerprint NAME` | entry | the ClientHello the entry sends: `chrome` (default), `chrome_nopq` (smaller hello, no post-quantum key share), `firefox`, `safari`, `ios`, `android`, or `go` (Go's own, recognisable as Go) |
 | `--connect IP:PORT`, `--sni NAME` | entry | dial this address instead of resolving; send this TLS server name |
 | `--forward-listen ADDR:PORT`, `--forward-name NAME` | entry | where your proxy clients connect; the forward's name (default `x1`) |
 | `--conns N`, `--chunk-parallel N`, `--socks ADDR:PORT` | entry | parallel connections, chunk requests in flight, optional SOCKS5 listener |

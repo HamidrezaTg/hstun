@@ -5,8 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        hstun is plain transport engineering: real TLS, a real WebSocket or HTTP request, an authenticated handshake. It deliberately does
-        not imitate other protocols or copy a browser's TLS fingerprint, so requests for that are out of scope (see docs/security.md).
+        hstun aims to be hard to detect and block (see docs/stealth-plan.md). A new technique is easiest to accept when you can say how
+        it would be measured: what a censor sees now, what it would see after, and what it costs.
   - type: textarea
     id: problem
     attributes:

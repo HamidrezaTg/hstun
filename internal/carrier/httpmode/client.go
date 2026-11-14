@@ -83,18 +83,25 @@ func Dial(ctx context.Context, o carrier.Options, key []byte, name string) (net.
 		d.Timeout, tlsTimeout = chunkConnect, chunkConnect
 	}
 	tr := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// The TLS handshake is ours so the ClientHello can look like a browser's.
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if o.Connect != "" {
 				addr = o.Connect
 			}
 			c, err := d.DialContext(ctx, network, addr)
-			if err == nil {
-				netx.Tune(c)
+			if err != nil {
+				return nil, err
 			}
-			return c, err
+			netx.Tune(c)
+			hctx, cancel := context.WithTimeout(ctx, tlsTimeout)
+			defer cancel()
+			tc, err := o.Handshake(hctx, c)
+			if err != nil {
+				_ = c.Close()
+				return nil, err
+			}
+			return tc, nil
 		},
-		TLSClientConfig:     o.TLS.Clone(),
-		TLSHandshakeTimeout: tlsTimeout,
 		DisableKeepAlives:   o.Chunk, // one connection per request
 		ForceAttemptHTTP2:   false,
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
@@ -103,7 +110,7 @@ func Dial(ctx context.Context, o carrier.Options, key []byte, name string) (net.
 		MaxConnsPerHost:     nUp + nDown + 2,
 		IdleConnTimeout:     90 * time.Second,
 	}
-	hc := &http.Client{Transport: carrier.WithUserAgent(tr, o.UserAgent)}
+	hc := &http.Client{Transport: carrier.WithUserAgent(tr, o.UA())}
 	base := "https://" + o.Server + o.HTTPPath
 
 	st, hello, err := proto.ClientBegin(key, proto.CarrierHTTP, name)

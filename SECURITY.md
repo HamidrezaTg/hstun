@@ -44,8 +44,8 @@ Only the latest release gets fixes. Update with `hstun-ctl update`; releases shi
 
 ## Out of scope
 
-- traffic analysis and fingerprinting: hstun uses plain TLS from Go's standard library and says so; it does not claim to
-  hide that you use HTTPS to a server (see [docs/security.md](docs/security.md));
+- traffic analysis and fingerprinting as such: hstun sends a browser-like ClientHello and a decoy site but does not claim to
+  be indistinguishable from web browsing (see [docs/security.md](docs/security.md)); a concrete tell you found is welcome as a normal issue;
 - attacks that need the secret, root on the host, or a modified binary;
 - weaknesses in nginx, cloudflared, Cloudflare, your proxy (Xray and others) or the operating system;
 - denial of service by sending more traffic than the host's bandwidth.

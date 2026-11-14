@@ -47,7 +47,7 @@ Measured from that client host to a Cloudflare-fronted exit abroad (real HTTPS t
 Single stream download about 5 Mbit/s, upload 7-10 Mbit/s. More `chunk_parallel` did not help.
 
 Cost: many short TLS connections to the CDN (about 15-30 per second while busy) is a different and louder wire pattern than ws, and it is
-slow. It adds no protocol imitation: standard TLS and HTTP, one fixed SNI, no random URLs or headers. Use it only where ws cannot work.
+slow. It uses standard TLS and HTTP with one fixed SNI. Use it only where ws cannot work.
 Tests: `internal/e2e` runs it through a proxy that cuts connections after 24 KB up and 48 KB down (the plain http carrier fails there),
 through a 5% connection-swallowing, delayed path with four concurrent streams, and `internal/testutil.BudgetProxy` is the harness.
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"hstun/internal/carrier"
 	"hstun/internal/decoy"
 )
 
@@ -119,7 +120,10 @@ type ClientSection struct {
 	TLSVerify  string `toml:"tls_verify"`
 	CAFile     string `toml:"ca_file"`
 	SPKISHA256 string `toml:"spki_sha256"`
-	TLSMLKEM   bool   `toml:"tls_mlkem"`
+	TLSMLKEM   bool   `toml:"tls_mlkem"` // only for tls_fingerprint = "go"
+	// TLSFingerprint is the ClientHello the client sends: chrome (default), chrome_nopq,
+	// firefox, safari, ios, android, or go (crypto/tls as it is).
+	TLSFingerprint string `toml:"tls_fingerprint"`
 
 	Ping        string `toml:"ping"`
 	IdleTimeout string `toml:"idle_timeout"`
@@ -319,6 +323,7 @@ func LoadClient(path string) (*ClientFile, error) {
 	f.Client.WSPath = DefaultWSPath
 	f.Client.HTTPPath = DefaultHTTPPath
 	f.Client.TLSVerify = "system"
+	f.Client.TLSFingerprint = "chrome"
 	f.Client.Ping = "25s"
 	f.Client.IdleTimeout = "10m"
 	f.Client.DrainTimeout = "10s"
@@ -341,6 +346,9 @@ func (f *ClientFile) validate() error {
 		if _, _, err := net.SplitHostPort(c.Connect); err != nil {
 			return fmt.Errorf("client: connect: %w", err)
 		}
+	}
+	if !carrier.ValidFingerprint(c.TLSFingerprint) {
+		return fmt.Errorf("client: tls_fingerprint must be one of %s, got %q", strings.Join(carrier.FingerprintNames(), ", "), c.TLSFingerprint)
 	}
 	if c.Carrier != "ws" && c.Carrier != "http" && c.Carrier != "chunk" && c.Carrier != "auto" {
 		return fmt.Errorf("client: carrier must be ws, http, chunk or auto, got %q", c.Carrier)
